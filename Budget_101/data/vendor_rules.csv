@@ -1,0 +1,97 @@
+vendor_pattern,category,subcategory
+LYFT,Transportation,Rideshare
+UBER,Transportation,Rideshare
+AMAZON,Shopping,Online Shopping
+NETFLIX,Entertainment,Streaming Services
+SPOTIFY,Entertainment,Streaming Services
+DOORDASH,Dining,Food Delivery
+GRUBHUB,Dining,Food Delivery
+INSTACART,Shopping,Grocery Delivery
+TRADER JOE,Shopping,Grocery
+WHOLE FOODS,Shopping,Grocery
+STARBUCKS,Dining,Coffee Shops
+TARGET,Shopping,Department Store
+WALMART,Shopping,Grocery
+WAL-MART,Shopping,Grocery
+WM SUPERCENTER,Shopping,Grocery
+WALGREENS,Shopping,Pharmacy
+CVS,Shopping,Pharmacy
+AIRBNB,Travel,Accommodations
+HOTEL,Travel,Accommodations
+AIRLINE,Travel,Airfare
+AIRWAYS,Travel,Airfare
+FLIGHT,Travel,Airfare
+COT*FLT,Travel,Airfare
+CINEMARK,Entertainment,Movies
+AMC,Entertainment,Movies
+REGAL,Entertainment,Movies
+RESTAURANT,Dining,Restaurant
+PIZZA,Dining,Restaurant
+CAPITAL ONE AUTOPAY PYMT,Payment/Credit,Payment/Credit
+CHARGEPOINT,Transportation,EV Charging
+GIGSTREEM,Utilities,Internet
+PATEL BROTHERS,Shopping,Grocery
+CAPITAL ONE MOBILE PYMT,Payment/Credit,Payment/Credit
+PROGRESSIVE,Transportation,Insurance
+CAPITAL ONE MEMBER FEE,Credit Card,Credit Card
+CONNECT BY AMFAM,Transportation,Insurance
+G2G,Entertainment,Internet
+GEXA,Utilities,Electricity
+BRAUMS,Shopping,Grocery
+SWADESHI PLAZA,Shopping,Grocery
+TOM THUMB,Shopping,Grocery
+H-E-B,Shopping,Grocery
+PANDA EXPRESS,Dining,Restaurant
+RENT,Rent,Apartment Rent
+BILT REWARDS,Rent,Apartment Rent
+ONLINE ACH PAYMENT,Payment/Credit,Payment/Credit
+PAY WITH POINTS STATEMENT CREDIT,Payment/Credit,Payment/Credit
+SIMPLY SOUTH,Dining,Restaurant
+HG SPLY CO,Dining,Restaurant
+GENGHIS GRILL,Dining,Restaurant
+MISTER 01,Dining,Restaurant
+THAI,Dining,Restaurant
+BIKANERVALA,Dining,Restaurant
+LA MADELEINE,Dining,Restaurant
+PAPA POBLANOS,Dining,Restaurant
+BOMBAY SWEETS,Dining,Restaurant
+KAILASH,Dining,Restaurant
+PARIS BAGUETTE,Dining,Restaurant
+JASON'S DELI,Dining,Restaurant
+JASONSDELI,Dining,Restaurant
+KAKATIYA,Dining,Restaurant
+CHINCHIKURIN,Dining,Restaurant
+TACOS,Dining,Restaurant
+HONEST,Dining,Restaurant
+KRISHNA JUICE,Dining,Restaurant
+SHAWARMA PRESS,Dining,Restaurant
+RED HOT INDO,Dining,Restaurant
+CHIPOTLE,Dining,Restaurant
+DESI DISTRICT,Dining,Restaurant
+SUN N' FUN,Dining,Restaurant
+PAKORA,Dining,Restaurant
+THIRSTY LION,Dining,Restaurant
+SOUL FOODS INDIA,Shopping,Grocery
+H MART,Shopping,Grocery
+DOLLAR TREE,Shopping,Grocery
+AVOCA COFFEE,Dining,Restaurant
+CAFE,Dining,Restaurant
+MEDITERRANEAN,Dining,Restaurant
+MANDOLOUN,Dining,Restaurant
+TASTE,Dining,Restaurant
+TOTAL WINE,Dining,Alcohol
+SUBWAY,Dining,Restaurant
+DIMASSI,Dining,Restaurant
+CHILLI,Dining,Restaurant
+CHILI'S,Dining,Restaurant
+VELVET TACO,Dining,Restaurant
+MCDONALD'S,Dining,Restaurant
+WABI HOUSE,Dining,Restaurant
+KENNYS ITALIAN,Dining,Restaurant
+CREAMISTRY,Dining,Restaurant
+BUC-EE'S,Transportation,Gas/Automotive
+CHEVRON,Transportation,Gas/Automotive
+MICHAELS,Shopping,Merchandise
+MESERO PRESTONWOOD,Dining,Restaurant
+Tesla Reservation,Transportation,New Car Deposit
+TRITEK WINDOW TINTING,Transportation,Car Tint

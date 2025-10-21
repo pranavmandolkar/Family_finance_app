@@ -1,0 +1,7 @@
+description,amount,frequency,category,sub_category,start_month,end_month,id
+Future Car Fund,600.0,Monthly,Savings,Car Fund,2024-01-01,2025-07-30,payment_0
+Future Car Fund,300.0,Monthly,Savings,Car Fund,2025-08-01,,payment_1
+Car Maintenance fund,84.0,Monthly,Savings,Car Maintenance,2024-01-01,,payment_2
+Vacation fund,334.0,Monthly,Savings,Vacation Fund,2024-01-01,,payment_3
+India transfer,300.0,Monthly,India,Home maintenance Fund,2024-10-01,,payment_4
+India transfer,2000.0,Monthly,India,Home maintenance Fund,2023-01-01,2024-09-30,payment_5

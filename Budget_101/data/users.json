@@ -1,0 +1,8 @@
+{
+  "admin": {
+    "password_hash": "701bcf136a92edd04a4c461fd78f1457fdd52873e5177fd015752ff2207a915b",
+    "salt": "91Dfdn0FZpKy1Lfz",
+    "is_admin": true,
+    "name": "Administrator"
+  }
+}
