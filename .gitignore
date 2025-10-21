@@ -1,0 +1,16 @@
+# IDE specific files
+.idea/
+
+# Python cache files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environment
+venv/
+env/
+.env
+
+# Data files that shouldn't be tracked
+*.log
