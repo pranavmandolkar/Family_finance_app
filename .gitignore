@@ -14,3 +14,4 @@ env/
 
 # Data files that shouldn't be tracked
 *.log
+/Budget_101/.streamlit/
