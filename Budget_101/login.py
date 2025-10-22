@@ -12,7 +12,7 @@ def login_page():
 
     # Title and description
     st.title("🔒 Family Expense Tracker")
-    st.subheader("Login to access your financial data")
+    st.subheader("Login to access your financial user_transactions_data")
 
     # Check if already logged in
     if "authenticated" in st.session_state and st.session_state.authenticated:

@@ -3,9 +3,10 @@ import json
 import hashlib
 import secrets
 import string
+from s3_utils import read_json_from_s3, write_json_to_s3, create_user_folder_structure, s3_file_exists
 
-# File path for storing user credentials
-USER_DB_FILE = os.path.join('data', 'users.json')
+# File name for storing user credentials in S3
+USER_DB_FILE = 'users.json'
 
 def generate_salt(length=16):
     """Generate a random salt for password hashing."""
@@ -24,12 +25,19 @@ def hash_password(password, salt=None):
     return password_hash, salt
 
 def initialize_user_db():
-    """Create the users database file if it doesn't exist."""
-    # Make sure the data directory exists
-    os.makedirs(os.path.dirname(USER_DB_FILE), exist_ok=True)
+    """Create the users database file in S3 if it doesn't exist."""
+    # We'll store the main users database in the root of the bucket
+    # under a special 'admin' folder
+    admin_username = "admin"
 
-    # If file doesn't exist, create it with an admin user
-    if not os.path.exists(USER_DB_FILE):
+    # Check if users.json exists in the admin folder
+    admin_users = read_json_from_s3(admin_username, USER_DB_FILE)
+
+    if not admin_users:
+        # Create admin folder structure if it doesn't exist
+        create_user_folder_structure(admin_username)
+
+        # Create default admin user
         admin_salt = generate_salt()
         admin_password_hash, _ = hash_password("admin", admin_salt)
 
@@ -42,32 +50,33 @@ def initialize_user_db():
             }
         }
 
-        with open(USER_DB_FILE, 'w') as f:
-            json.dump(users, f, indent=2)
-
+        # Save to S3
+        write_json_to_s3(admin_username, USER_DB_FILE, users)
         return True
 
     return False
 
 def get_users():
-    """Get all users from the database."""
+    """Get all users from the S3 database."""
     try:
-        if os.path.exists(USER_DB_FILE):
-            with open(USER_DB_FILE, 'r') as f:
-                return json.load(f)
-        else:
+        admin_username = "admin"
+        users = read_json_from_s3(admin_username, USER_DB_FILE)
+
+        if not users:
             initialize_user_db()
-            with open(USER_DB_FILE, 'r') as f:
-                return json.load(f)
+            users = read_json_from_s3(admin_username, USER_DB_FILE)
+
+        return users or {}
+
     except Exception as e:
         print(f"Error reading user database: {e}")
         return {}
 
 def save_users(users):
-    """Save users to the database."""
+    """Save users to the S3 database."""
     try:
-        with open(USER_DB_FILE, 'w') as f:
-            json.dump(users, f, indent=2)
+        admin_username = "admin"
+        write_json_to_s3(admin_username, USER_DB_FILE, users)
         return True
     except Exception as e:
         print(f"Error saving user database: {e}")
@@ -91,7 +100,7 @@ def authenticate_user(username, password):
     return False
 
 def add_user(username, password, name, is_admin=False):
-    """Add a new user to the database."""
+    """Add a new user to the database and create their folder structure in S3."""
     users = get_users()
 
     # Check if username already exists
@@ -112,12 +121,17 @@ def add_user(username, password, name, is_admin=False):
 
     # Save the updated users
     if save_users(users):
+        # Create the user's folder structure in S3
+        create_user_folder_structure(username)
         return True, "User added successfully"
     else:
         return False, "Error saving user"
 
+# Rest of the functions remain mostly the same
 def delete_user(username):
     """Delete a user from the database."""
+    # Note: We don't delete the user's S3 data folder for data preservation
+    # That would require additional implementation if needed
     users = get_users()
 
     # Check if user exists
