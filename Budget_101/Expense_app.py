@@ -2,6 +2,8 @@ import streamlit as st
 
 # Import login functionality
 from login import login_page
+# Import S3 utilities
+from s3_utils import read_file_from_s3, list_files_in_user_folder
 
 # Check if user wants to see the main app
 if "show_main_app" not in st.session_state:
@@ -29,6 +31,7 @@ import calendar
 from PIL import Image
 import numpy as np
 import re
+from io import StringIO
 
 # Set page configuration
 st.set_page_config(
@@ -38,10 +41,25 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Helper function to load data from S3
+def load_csv_from_s3(username, subfolder, filename):
+    """Load a CSV file from S3 and return as pandas DataFrame."""
+    file_path = f"{subfolder}/{filename}"
+    file_content = read_file_from_s3(username, file_path)
+
+    if file_content is None:
+        return None
+
+    # Convert string content to DataFrame using StringIO
+    return pd.read_csv(StringIO(file_content))
+
 # Utility functions for data processing
-def load_discover_data(file_path):
-    """Load and process Discover card transaction data."""
-    df = pd.read_csv(file_path)
+def load_discover_data(username, file_name):
+    """Load and process Discover card transaction data from S3."""
+    df = load_csv_from_s3(username, "user_transactions_data/discover", file_name)
+    if df is None:
+        return pd.DataFrame()
+
     # Convert date columns to datetime
     df['Trans. Date'] = pd.to_datetime(df['Trans. Date'], format='%m/%d/%Y')
     # Ensure amount is treated correctly (positive for expenses, negative for payments/credits)
@@ -62,12 +80,14 @@ def load_discover_data(file_path):
     })
     return df
 
-def load_bilt_data(file_path):
-    """Load and process Bilt transaction data.
+def load_bilt_data(username, file_name):
+    """Load and process Bilt transaction data from S3.
     Note: For Bilt, credit and debit are reversed from the standard convention.
     Negative values in the 'Debit/Credit' column represent expenses (debits).
     Positive values in the 'Debit/Credit' column represent payments/credits."""
-    df = pd.read_csv(file_path)
+    df = load_csv_from_s3(username, "user_transactions_data/bilt", file_name)
+    if df is None:
+        return pd.DataFrame()
 
     # Convert date column to datetime
     df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], format='%m/%d/%Y')
@@ -97,37 +117,141 @@ def load_bilt_data(file_path):
 
     return df
 
-def load_capital_one_data(file_path):
-    """Load and process Capital One transaction data."""
-    df = pd.read_csv(file_path)
-    # Convert date columns to datetime
-    df['Transaction Date'] = pd.to_datetime(df['Transaction Date'])
-    # Calculate amount (credit is negative, debit is positive for consistency)
-    df['Debit'] = pd.to_numeric(df['Debit'], errors='coerce').fillna(0)
-    df['Credit'] = pd.to_numeric(df['Credit'], errors='coerce').fillna(0)
+def load_capital_one_data(username, file_name):
+    """Load and process Capital One transaction data from S3."""
+    df = load_csv_from_s3(username, "user_transactions_data/Venture_X", file_name)
+    if df is None:
+        return pd.DataFrame()
 
-    # Handle returns: if debit and credit are the same for a transaction, it's likely a return/correction
-    # Create a flag to identify returns
-    df['Is_Return'] = (df['Debit'] > 0) & (df['Credit'] > 0) & (df['Debit'] == df['Credit'])
+    # Print columns for debugging
+    print(f"Capital One file columns: {list(df.columns)}")
 
-    # For regular transactions: credit is negative, debit is positive
-    df['Amount'] = df['Debit'] - df['Credit']
+    # Check if dataframe has content
+    if df.empty:
+        print(f"CSV file is empty: {file_name}")
+        return pd.DataFrame()
 
-    # Add a 'Bank' column
-    df['Bank'] = 'Capital One'
-    # Standardize column names
-    df = df.rename(columns={
-        'Transaction Date': 'Date',
-        'Category': 'Category'
-    })
+    try:
+        # Common variations of date column names
+        date_col_options = ['Transaction Date', 'Trans Date', 'Date', 'Posted Date', 'Transaction_Date']
+        date_col = None
 
-    # Additional processing to find potential refunds by matching descriptions
-    # This helps catch cases like airline tickets where the refund might come as a separate transaction
-    return df
+        # Find the first matching date column
+        for col in date_col_options:
+            if col in df.columns:
+                date_col = col
+                break
 
-def load_saver_one_data(file_path):
-    """Load and process Saver One transaction data."""
-    df = pd.read_csv(file_path)
+        # If no date column found, create a default one with today's date
+        if date_col is None:
+            print(f"No date column found in {file_name}. Using today's date.")
+            df['Date'] = pd.to_datetime('today')
+        else:
+            # Convert date column to datetime
+            df['Date'] = pd.to_datetime(df[date_col], errors='coerce')
+
+        # Common variations of debit/credit column names
+        debit_col_options = ['Debit', 'Debit Amount', 'Amount']
+        credit_col_options = ['Credit', 'Credit Amount', 'Payment']
+
+        # Find matching debit column
+        debit_col = None
+        for col in debit_col_options:
+            if col in df.columns:
+                debit_col = col
+                break
+
+        # Find matching credit column
+        credit_col = None
+        for col in credit_col_options:
+            if col in df.columns:
+                credit_col = col
+                break
+
+        # If we have both debit and credit columns
+        if debit_col and credit_col:
+            df['Debit'] = pd.to_numeric(df[debit_col], errors='coerce').fillna(0)
+            df['Credit'] = pd.to_numeric(df[credit_col], errors='coerce').fillna(0)
+            df['Is_Return'] = (df['Debit'] > 0) & (df['Credit'] > 0) & (df['Debit'] == df['Credit'])
+            df['Amount'] = df['Debit'] - df['Credit']
+        # If we only have one amount column
+        elif debit_col:
+            df['Amount'] = pd.to_numeric(df[debit_col], errors='coerce').fillna(0)
+            df['Is_Return'] = False
+        elif credit_col:
+            df['Amount'] = pd.to_numeric(df[credit_col], errors='coerce').fillna(0)
+            df['Is_Return'] = False
+        else:
+            # If no amount column found, look for a column with numeric values
+            amount_col = None
+            for col in df.columns:
+                if pd.api.types.is_numeric_dtype(df[col]):
+                    amount_col = col
+                    break
+
+            if amount_col:
+                df['Amount'] = pd.to_numeric(df[amount_col], errors='coerce').fillna(0)
+            else:
+                print(f"No amount column found in {file_name}. Using zeros.")
+                df['Amount'] = 0
+
+            df['Is_Return'] = False
+
+        # Check for description column
+        desc_col_options = ['Description', 'Desc', 'Transaction Description', 'Merchant', 'Merchant Name']
+        desc_col = None
+
+        for col in desc_col_options:
+            if col in df.columns:
+                desc_col = col
+                break
+
+        if desc_col:
+            df['Description'] = df[desc_col]
+        else:
+            df['Description'] = f"Transaction from {file_name}"
+
+        # Check for category column
+        cat_col_options = ['Category', 'Transaction Category', 'Type']
+        cat_col = None
+
+        for col in cat_col_options:
+            if col in df.columns:
+                cat_col = col
+                break
+
+        if cat_col:
+            df['Category'] = df[cat_col]
+        else:
+            df['Category'] = 'Uncategorized'
+
+        # Add bank column
+        df['Bank'] = 'Capital One'
+
+        # Return only the columns we need
+        required_cols = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
+        missing_cols = set(required_cols) - set(df.columns)
+
+        # Add any missing columns
+        for col in missing_cols:
+            if col == 'Is_Return':
+                df[col] = False
+            else:
+                df[col] = None
+
+        return df[required_cols]
+
+    except Exception as e:
+        print(f"Error processing Capital One data from {file_name}: {str(e)}")
+        # Return empty DataFrame with the expected columns
+        return pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
+
+def load_saver_one_data(username, file_name):
+    """Load and process Saver One transaction data from S3."""
+    df = load_csv_from_s3(username, "user_transactions_data/Saver_one", file_name)
+    if df is None:
+        return pd.DataFrame()
+
     # Convert date columns to datetime
     df['Transaction Date'] = pd.to_datetime(df['Transaction Date'])
     # Calculate amount (credit is negative, debit is positive for consistency)
@@ -155,27 +279,27 @@ def load_all_transaction_data():
     all_data = []
 
     # Process Discover data
-    discover_files = glob.glob(os.path.join('data', 'discover', '*.csv'))
+    discover_files = list_files_in_user_folder("user_transactions_data/discover", st.session_state.username)
     for file in discover_files:
-        df = load_discover_data(file)
+        df = load_discover_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Capital One data
-    capital_one_files = glob.glob(os.path.join('data', 'Venture_X', '*.csv'))
+    capital_one_files = list_files_in_user_folder("user_transactions_data/Venture_X", st.session_state.username)
     for file in capital_one_files:
-        df = load_capital_one_data(file)
+        df = load_capital_one_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Saver One data
-    saver_one_files = glob.glob(os.path.join('data', 'Saver_one', '*.csv'))
+    saver_one_files = list_files_in_user_folder("user_transactions_data/Saver_one", st.session_state.username)
     for file in saver_one_files:
-        df = load_saver_one_data(file)
+        df = load_saver_one_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Bilt data
-    bilt_files = glob.glob(os.path.join('data', 'bilt', '*.csv'))
+    bilt_files = list_files_in_user_folder("user_transactions_data/bilt", st.session_state.username)
     for file in bilt_files:
-        df = load_bilt_data(file)
+        df = load_bilt_data(st.session_state.username, file)
         all_data.append(df)
 
     # Combine all data
@@ -291,15 +415,33 @@ def filter_expenses_only(df):
     return df[(df['Amount'] > 0) & (~df['Is_Return'])].copy()
 
 def load_vendor_rules():
-    """Load vendor pattern rules for automatic categorization."""
-    rules_file = os.path.join('data', 'vendor_rules.csv')
-    if os.path.exists(rules_file):
-        return pd.read_csv(rules_file)
+    """Load vendor pattern rules for automatic categorization from the shared core_app_data folder."""
+    try:
+        # Since vendor_rules.csv is shared across all users, we'll use a special function to read it
+        # or fall back to local file if needed
+
+        # Try to load from S3 first (using a dummy username as this is a shared file)
+        file_content = read_file_from_s3("shared", "core_app_data/vendor_rules.csv")
+
+        if file_content is not None:
+            # Convert string content to DataFrame using StringIO
+            from io import StringIO
+            return pd.read_csv(StringIO(file_content))
+
+        # Fallback to local file if S3 retrieval fails
+        local_rules_file = os.path.join('core_app_data', 'vendor_rules.csv')
+        if os.path.exists(local_rules_file):
+            return pd.read_csv(local_rules_file)
+
+    except Exception as e:
+        print(f"Error loading vendor rules: {str(e)}")
+
+    # Return empty DataFrame with expected columns if file doesn't exist or error occurs
     return pd.DataFrame(columns=['vendor_pattern', 'category', 'subcategory'])
 
 def load_category_mapping():
     """Load manual category mappings from Spend_categories.csv file."""
-    categories_file = os.path.join('data', 'Spend_categories.csv')
+    categories_file = os.path.join('user_transactions_data', 'Spend_categories.csv')
     if os.path.exists(categories_file):
         return pd.read_csv(categories_file)
     return pd.DataFrame(columns=['Description', 'Category', 'Changed_Sub-Category', 'Changed_Category'])
@@ -374,45 +516,75 @@ def enhanced_categorize_transactions(df):
 
 # Function to load income data
 def load_income_data():
-    income_file = os.path.join('data', 'income_data.csv')
-    if os.path.exists(income_file):
-        df = pd.read_csv(income_file)
-        # Convert date columns to datetime if they exist and strip time component
-        if 'start_month' in df.columns and not df['start_month'].empty:
-            df['start_month'] = pd.to_datetime(df['start_month'], errors='coerce').dt.date
-        if 'end_month' in df.columns and not df['end_month'].empty:
-            df['end_month'] = pd.to_datetime(df['end_month'], errors='coerce').dt.date
+    # Get username from session state
+    username = st.session_state.username
+    income_file_path = 'income_data.csv'
 
-        # Add a unique ID if not present
-        if 'id' not in df.columns:
-            df['id'] = [f"income_{i}" for i in range(len(df))]
-            save_income_data(df)
-        return df
+    # Try to load from S3 using the username
+    try:
+        file_content = read_file_from_s3(username, income_file_path)
+        if file_content is not None:
+            # Convert string content to DataFrame using StringIO
+            from io import StringIO
+            df = pd.read_csv(StringIO(file_content))
+
+            # Convert date columns to datetime if they exist
+            if 'start_month' in df.columns and not df['start_month'].empty:
+                df['start_month'] = pd.to_datetime(df['start_month'], errors='coerce').dt.date
+            if 'end_month' in df.columns and not df['end_month'].empty:
+                df['end_month'] = pd.to_datetime(df['end_month'], errors='coerce').dt.date
+
+            # Add a unique ID if not present
+            if 'id' not in df.columns:
+                df['id'] = [f"income_{i}" for i in range(len(df))]
+                save_income_data(df)
+            return df
+    except Exception as e:
+        print(f"Error loading income data from S3: {str(e)}")
+
+    # If we reach here, either the file doesn't exist or there was an error
     return pd.DataFrame(columns=['person', 'income_source', 'amount', 'frequency', 'start_month', 'end_month', 'id'])
 
 # Function to load recurring payment data
 def load_recurring_payments():
-    payments_file = os.path.join('data', 'recurring_payments.csv')
-    if os.path.exists(payments_file):
-        df = pd.read_csv(payments_file)
-        # Convert date columns to datetime if they exist and strip time component
-        if 'start_month' in df.columns and not df.empty and not df['start_month'].empty:
-            df['start_month'] = pd.to_datetime(df['start_month'], errors='coerce').dt.date
-        if 'end_month' in df.columns and not df.empty and not df['end_month'].empty:
-            df['end_month'] = pd.to_datetime(df['end_month'], errors='coerce').dt.date
+    # Get username from session state
+    username = st.session_state.username
+    payments_file_path = 'recurring_payments.csv'
 
-        # Add a unique ID if not present
-        if 'id' not in df.columns:
-            df['id'] = [f"payment_{i}" for i in range(len(df))]
-            save_recurring_payments(df)
-        return df
+    # Try to load from S3 using the username
+    try:
+        file_content = read_file_from_s3(username, payments_file_path)
+        if file_content is not None:
+            # Convert string content to DataFrame using StringIO
+            from io import StringIO
+            df = pd.read_csv(StringIO(file_content))
+
+            # Convert date columns to datetime if they exist
+            if 'start_month' in df.columns and not df.empty and not df['start_month'].empty:
+                df['start_month'] = pd.to_datetime(df['start_month'], errors='coerce').dt.date
+            if 'end_month' in df.columns and not df.empty and not df['end_month'].empty:
+                df['end_month'] = pd.to_datetime(df['end_month'], errors='coerce').dt.date
+
+            # Add a unique ID if not present
+            if 'id' not in df.columns:
+                df['id'] = [f"payment_{i}" for i in range(len(df))]
+                save_recurring_payments(df)
+            return df
+    except Exception as e:
+        print(f"Error loading recurring payments data from S3: {str(e)}")
+
+    # If we reach here, either the file doesn't exist or there was an error
     return pd.DataFrame(columns=['description', 'amount', 'frequency', 'category', 'start_month', 'end_month', 'sub_category', 'id'])
 
 # Function to save income data
 def save_income_data(df):
-    income_file = os.path.join('data', 'income_data.csv')
+    # Get username from session state
+    username = st.session_state.username
+    income_file_path = 'income_data.csv'
+
     # Create a copy of the dataframe to avoid modifying the original
     save_df = df.copy()
+
     # Convert date columns to string format without time component
     if 'start_month' in save_df.columns:
         save_df['start_month'] = save_df['start_month'].astype(str).str.split(' ').str[0]
@@ -420,11 +592,26 @@ def save_income_data(df):
         save_df['end_month'] = save_df['end_month'].astype(str).str.split(' ').str[0]
         # Replace 'NaT' with empty string
         save_df['end_month'] = save_df['end_month'].replace('NaT', '')
-    save_df.to_csv(income_file, index=False)
+
+    try:
+        # Convert dataframe to CSV string
+        csv_content = save_df.to_csv(index=False)
+
+        # Save to S3
+        from s3_utils import write_file_to_s3
+        write_file_to_s3(username, income_file_path, csv_content)
+    except Exception as e:
+        print(f"Error saving income data to S3: {str(e)}")
+        # Fallback to local save if S3 fails
+        income_file = os.path.join('user_transactions_data', 'income_data.csv')
+        save_df.to_csv(income_file, index=False)
 
 # Function to save recurring payment data
 def save_recurring_payments(df):
-    payments_file = os.path.join('data', 'recurring_payments.csv')
+    # Get username from session state
+    username = st.session_state.username
+    payments_file_path = 'recurring_payments.csv'
+
     # Create a copy of the dataframe to avoid modifying the original
     save_df = df.copy()
 
@@ -445,7 +632,18 @@ def save_recurring_payments(df):
         # Replace 'NaT' with empty string
         save_df['end_month'] = save_df['end_month'].replace('NaT', '')
 
-    save_df.to_csv(payments_file, index=False)
+    try:
+        # Convert dataframe to CSV string
+        csv_content = save_df.to_csv(index=False)
+
+        # Save to S3
+        from s3_utils import write_file_to_s3
+        write_file_to_s3(username, payments_file_path, csv_content)
+    except Exception as e:
+        print(f"Error saving recurring payments data to S3: {str(e)}")
+        # Fallback to local save if S3 fails
+        payments_file = os.path.join('user_transactions_data', 'recurring_payments.csv')
+        save_df.to_csv(payments_file, index=False)
 
 # Calculate monthly income based on frequency
 def calculate_monthly_income(amount, frequency):
@@ -479,7 +677,7 @@ def calculate_active_monthly_income(income_data, reference_date=None):
     # Default to current date if no reference date is provided
     if reference_date is None:
         reference_date = pd.Timestamp(datetime.now().date())
-    # Handle Python's datetime.date type - need to import datetime module properly
+    # Handle Python's datetime.date type
     elif hasattr(reference_date, 'year') and hasattr(reference_date, 'month') and hasattr(reference_date, 'day'):
         # Convert Python date to pandas Timestamp for consistent comparison
         reference_date = pd.Timestamp(reference_date)
@@ -589,7 +787,7 @@ def calculate_active_monthly_payments(payment_data, reference_date=None):
 st.title("💰 Family Expense Tracker")
 st.markdown("""
     Track, visualize, and analyze your family expenses across different bank accounts.
-    Upload your transaction files in the data directory organized by bank name.
+    Upload your transaction files in the user_transactions_data directory organized by bank name.
 """)
 
 # Load all transaction data first, so it's available for the sidebar
@@ -708,7 +906,7 @@ with st.spinner("Loading transaction data..."):
     all_transactions = load_all_transaction_data()
 
 if all_transactions.empty:
-    st.warning("No transaction data found. Please make sure CSV files are available in the data directory.")
+    st.warning("No transaction data found. Please make sure CSV files are available in the user_transactions_data directory.")
 else:
     # Use the enhanced categorization system
     enhanced_transactions = enhanced_categorize_transactions(all_transactions)
@@ -1722,7 +1920,7 @@ else:
             # Prepare data for visualization with color coding
             plot_data = comparison_df.reset_index()
             # Add a color column to explicitly set colors based on difference
-            plot_data['Color'] = plot_data['Difference'].apply(lambda x: '#FF9B9B' if x > 0 else '#96D6B0')
+            plot_data['Color'] = plot_data['Difference'].apply(lambda x: '#FF9B99' if x > 0 else '#96D6B0')
 
             # Visualize the comparison with color-coded bars
             fig_bar_compare = px.bar(
@@ -2030,8 +2228,18 @@ else:
 
                         # Save updated rules
                         try:
-                            rules_file = os.path.join('data', 'vendor_rules.csv')
-                            updated_rules.to_csv(rules_file, index=False)
+                            # Convert dataframe to CSV string for S3 storage
+                            csv_content = updated_rules.to_csv(index=False)
+
+                            # Save to S3 in shared core_app_data folder
+                            from s3_utils import write_file_to_s3
+                            write_file_to_s3("shared", "core_app_data/vendor_rules.csv", csv_content)
+
+                            # Also update local file for fallback
+                            rules_file = os.path.join('core_app_data', 'vendor_rules.csv')
+                            if os.path.exists(os.path.dirname(rules_file)):  # Make sure directory exists
+                                updated_rules.to_csv(rules_file, index=False)
+
                             st.success(f"Added rule for '{pattern}'")
                             st.rerun()  # Refresh to show the new rule
                         except Exception as e:
@@ -2127,7 +2335,7 @@ else:
 
                         # Save updated mappings
                         try:
-                            categories_file = os.path.join('data', 'Spend_categories.csv')
+                            categories_file = os.path.join('user_transactions_data', 'Spend_categories.csv')
                             updated_mappings.to_csv(categories_file, index=False)
                             st.success(f"Added mapping for '{selected_desc}'")
                             st.rerun()  # Refresh to show the new mapping
@@ -2231,10 +2439,26 @@ else:
             This will make your transaction data available for analysis in the application.
             """)
 
-            # Get list of existing folders in data directory
-            data_dir = 'data'
-            folders = [folder for folder in os.listdir(data_dir)
-                      if os.path.isdir(os.path.join(data_dir, folder))]
+            # Get list of existing folders in user_transactions_data directory
+            # Use S3 storage instead of local filesystem
+            username = st.session_state.username
+            data_dir = 'user_transactions_data'
+
+            # Get folders from S3 instead of local directory
+            try:
+                # List all files in the user's transaction data directory
+                all_s3_files = list_files_in_user_folder(data_dir, username)
+
+                # Extract unique folder names from file paths
+                folders = set()
+                for file_path in all_s3_files:
+                    if '/' in file_path:
+                        folder_name = file_path.split('/')[0]
+                        folders.add(folder_name)
+                folders = list(folders)
+            except Exception as e:
+                st.error(f"Error retrieving folders: {str(e)}")
+                folders = []
 
             # Option to create a new folder
             create_new_folder = st.checkbox("Create a new bank folder")
@@ -2245,9 +2469,10 @@ else:
                 if new_folder_name:
                     if new_folder_name not in folders and new_folder_name != '':
                         if st.button("Create Folder"):
-                            new_folder_path = os.path.join(data_dir, new_folder_name)
                             try:
-                                os.makedirs(new_folder_path, exist_ok=True)
+                                # Create a placeholder file in S3 to represent the new folder
+                                from s3_utils import write_file_to_s3
+                                write_file_to_s3(username, f"{new_folder_name}/.placeholder", "")
                                 st.success(f"Successfully created folder: {new_folder_name}")
                                 # Add the new folder to the list
                                 folders.append(new_folder_name)
@@ -2259,11 +2484,15 @@ else:
                         st.warning("Folder already exists or invalid name provided.")
 
             # Folder selection for upload
-            selected_folder = st.selectbox(
-                "Select folder for upload:",
-                options=folders,
-                format_func=lambda x: x.capitalize()
-            )
+            if folders:
+                selected_folder = st.selectbox(
+                    "Select folder for upload:",
+                    options=folders,
+                    format_func=lambda x: x.capitalize()
+                )
+            else:
+                st.warning("No folders found. Please create a folder first.")
+                selected_folder = None
 
             # File uploader
             uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
