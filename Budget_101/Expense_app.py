@@ -20,15 +20,12 @@ if not st.session_state.authenticated or not st.session_state.show_main_app:
 
 # Continue with main app if authenticated
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 import os
-from datetime import datetime
-import glob
+from datetime import datetime, date
 import plotly.express as px
 import plotly.graph_objects as go
 import calendar
-from PIL import Image
+import numpy as np
 import numpy as np
 import re
 from io import StringIO
@@ -555,15 +552,22 @@ def load_recurring_payments():
     try:
         file_content = read_file_from_s3(username, payments_file_path)
         if file_content is not None:
-            # Convert string content to DataFrame using StringIO
             from io import StringIO
             df = pd.read_csv(StringIO(file_content))
 
-            # Convert date columns to datetime if they exist
+
             if 'start_month' in df.columns and not df.empty and not df['start_month'].empty:
-                df['start_month'] = pd.to_datetime(df['start_month'], errors='coerce').dt.date
+
+                # Convert to datetime first, handling any format
+                df['start_month'] = pd.to_datetime(df['start_month'], format='%Y-%m-%d', errors='coerce')
+
+                # Then convert to date objects
+                df['start_month'] = df['start_month'].dt.date
+
+
             if 'end_month' in df.columns and not df.empty and not df['end_month'].empty:
-                df['end_month'] = pd.to_datetime(df['end_month'], errors='coerce').dt.date
+                # Do the same for end_month
+                df['end_month'] = pd.to_datetime(df['end_month'], format='%Y-%m-%d', errors='coerce').dt.date
 
             # Add a unique ID if not present
             if 'id' not in df.columns:
@@ -624,13 +628,26 @@ def save_recurring_payments(df):
         # Create the column if it doesn't exist
         save_df['sub_category'] = 'General'
 
-    # Convert date columns to string format without time component if they exist
+    # Debug info for saving
     if 'start_month' in save_df.columns:
-        save_df['start_month'] = save_df['start_month'].astype(str).str.split(' ').str[0]
+        # Convert to string format YYYY-MM-DD
+        def format_date(x):
+            try:
+                if isinstance(x, (datetime, date)):
+                    return x.strftime('%Y-%m-%d')
+                elif pd.notna(x):
+                    return pd.to_datetime(x).strftime('%Y-%m-%d')
+                return None
+            except:
+                return None
+
+        save_df['start_month'] = save_df['start_month'].apply(format_date)
+
     if 'end_month' in save_df.columns:
-        save_df['end_month'] = save_df['end_month'].astype(str).str.split(' ').str[0]
-        # Replace 'NaT' with empty string
-        save_df['end_month'] = save_df['end_month'].replace('NaT', '')
+        # Handle end_month the same way
+        save_df['end_month'] = save_df['end_month'].apply(format_date)
+        # Replace None with empty string
+        save_df['end_month'] = save_df['end_month'].fillna('')
 
     try:
         # Convert dataframe to CSV string
@@ -975,20 +992,14 @@ else:
 
                         # Handle start_month and end_month
                         if pd.notna(selected_income_data['start_month']):
-                            if isinstance(selected_income_data['start_month'], str):
-                                st.session_state['edit_start_month'] = pd.to_datetime(selected_income_data['start_month']).date()
-                            else:
-                                st.session_state['edit_start_month'] = selected_income_data['start_month']
+                            st.session_state['edit_start_month'] = pd.to_datetime(selected_income_data['start_month']).date()
 
                         # Check if end_month exists and is not NaN/None
                         has_end_date = pd.notna(selected_income_data['end_month']) and selected_income_data['end_month'] not in ['None', '']
                         st.session_state.end_date_enabled = has_end_date
 
                         if has_end_date:
-                            if isinstance(selected_income_data['end_month'], str):
-                                st.session_state['edit_end_month'] = pd.to_datetime(selected_income_data['end_month']).date()
-                            else:
-                                st.session_state['edit_end_month'] = selected_income_data['end_month']
+                            st.session_state['edit_end_month'] = pd.to_datetime(selected_income_data['end_month']).date()
 
                         # Force a rerun to update the form with these values
                         st.rerun()
@@ -1135,22 +1146,31 @@ else:
                         st.session_state['edit_category'] = selected_payment_data['category']
                         st.session_state['edit_sub_category'] = selected_payment_data['sub_category']
 
-                        # Handle start_month and end_month
                         if pd.notna(selected_payment_data['start_month']):
-                            if isinstance(selected_payment_data['start_month'], str):
-                                st.session_state['edit_start_month'] = pd.to_datetime(selected_payment_data['start_month']).date()
-                            else:
-                                st.session_state['edit_start_month'] = selected_payment_data['start_month']
+                            try:
+                                # Convert to datetime first
+                                date_val = pd.to_datetime(selected_payment_data['start_month'])
+
+                                # Then convert to date
+                                st.session_state['edit_start_month'] = date_val.date()
+
+                            except Exception as e:
+                                st.error(f"Error converting date: {e}")
+                                # Use a default date if conversion fails
+                                st.session_state['edit_start_month'] = datetime.now().replace(day=1).date()
 
                         # Check if end_month exists and is not NaN/None
                         has_end_date = pd.notna(selected_payment_data['end_month']) and selected_payment_data['end_month'] not in ['None', '']
                         st.session_state.payment_end_date_enabled = has_end_date
 
                         if has_end_date:
-                            if isinstance(selected_payment_data['end_month'], str):
-                                st.session_state['edit_end_month'] = pd.to_datetime(selected_payment_data['end_month']).date()
-                            else:
-                                st.session_state['edit_end_month'] = selected_payment_data['end_month']
+                            try:
+                                # Convert end date the same way
+                                date_val = pd.to_datetime(selected_payment_data['end_month'])
+                                st.session_state['edit_end_month'] = date_val.date()
+                            except Exception as e:
+                                st.error(f"Error converting end date: {e}")
+                                st.session_state['edit_end_month'] = None
 
                         # Force a rerun to update the form with these values
                         st.rerun()
@@ -1182,14 +1202,37 @@ else:
             frequency_options = ["Monthly", "Bi-weekly", "Weekly", "Yearly", "Quarterly"]
             frequency = st.selectbox("Frequency", frequency_options,
                                     index=frequency_options.index(st.session_state.get('edit_frequency', "Monthly"))
-                                    if st.session_state.get('edit_frequency') in frequency_options else 0)
+                                    if st.session_state.get('edit_frequency') in frequency_options else 0,
+                                     key=f"frequency_{st.session_state.get('edit_frequency', 'new')}")
 
             category = st.text_input("Category", value=st.session_state.get('edit_category', ''))
             sub_category = st.text_input("Sub-category", value=st.session_state.get('edit_sub_category', ''))
 
-            # Add date fields for start month
-            start_month_default = st.session_state.get('edit_start_month', datetime.now().replace(day=1))
-            payment_start_month = st.date_input("Start Month", value=start_month_default, key="payment_start")
+
+            # Check if we're in edit mode
+            is_edit_mode = st.session_state.get('edit_payment', False)
+
+            # Get stored date from session state
+            session_date = st.session_state.get('edit_start_month')
+
+            if is_edit_mode and session_date is not None:
+                # Use the stored date when editing
+                start_date_value = session_date
+            else:
+                # Use current month's first day as default for new entries
+                start_date_value = datetime.now().replace(day=1).date()
+
+
+            # Create the date input with explicit min and max dates
+            min_date = datetime(2020, 1, 1).date()  # Reasonable minimum date
+            max_date = datetime(2030, 12, 31).date()  # Reasonable maximum date
+            payment_start_month = st.date_input(
+                "Start Month",
+                value=start_date_value,
+                min_value=min_date,
+                max_value=max_date,
+                key=f"payment_start_{st.session_state.get('edit_payment_id', 'new')}"  # Unique key for each edit
+            )
 
             # Show the end date input field based on the checkbox outside the form
             payment_end_month = None
@@ -1251,6 +1294,7 @@ else:
                 # Save updated recurring payments data
                 save_recurring_payments(recurring_payments)
                 st.rerun()  # Refresh the page to show updated data
+
 
     with tab2:
         st.header("Financial Overview")
@@ -2228,6 +2272,10 @@ else:
 
                         # Save updated rules
                         try:
+                            # Convert dates to appropriate format
+                            start_month_str = payment_start_month.strftime('%Y-%m-%d') if payment_start_month else None
+
+
                             # Convert dataframe to CSV string for S3 storage
                             csv_content = updated_rules.to_csv(index=False)
 
