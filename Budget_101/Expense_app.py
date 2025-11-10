@@ -1591,6 +1591,9 @@ else:
         # Calculate total monthly recurring payments for the selected month
         active_monthly_payments = calculate_active_monthly_payments(recurring_payments, selected_date_ts)
 
+        # calculate
+        active_monthly_budget = calculate_active_monthly_payments(monthly_budget_df, selected_date_ts)
+
         # Get actual expenses for the selected month from the transaction data
         if not expenses_only.empty:
             monthly_expenses = expenses_only[
@@ -1601,7 +1604,8 @@ else:
             monthly_expenses = 0.0
 
         # Calculate remaining budget after actual expenses
-        remaining_budget = active_monthly_income - active_monthly_payments - monthly_expenses
+        remaining_income = active_monthly_income - active_monthly_payments - monthly_expenses
+        remaining_budget = active_monthly_budget - active_monthly_payments - monthly_expenses
 
         # Display financial metrics
         col1, col2, col3 = st.columns(3)
@@ -1630,6 +1634,9 @@ else:
         with col3:
             # Colored remaining budget instead of st.metric
             render_colored_amount("Remaining Budget", remaining_budget)
+
+            # Colored remaining budget instead of st.metric
+            render_colored_amount("Remaining Income", remaining_income)
             st.caption(f"For {calendar.month_name[selected_month]} {selected_year}")
 
         # Monthly income, expense, and savings breakdown
@@ -1645,6 +1652,7 @@ else:
         # Initialize data arrays for the chart
         month_labels = [d.strftime('%b %Y') for d in month_range]
         income_values = []
+        budget_values = []
         fixed_expense_values = []
         variable_expense_values = []
         savings_values = []
@@ -1664,6 +1672,10 @@ else:
             # Calculate fixed expenses for this month
             month_fixed_expenses = calculate_active_monthly_payments(recurring_payments, month_date)
             fixed_expense_values.append(month_fixed_expenses)
+
+            # Calculate fixed budget for this month
+            month_budget = calculate_active_monthly_payments(monthly_budget_df, month_date)
+            budget_values.append(month_budget)
 
             # Calculate variable expenses from transaction data
             if not expenses_only.empty:
@@ -1704,6 +1716,14 @@ else:
             y=income_values,
             name='Income',
             line=dict(color='#2ca02c', width=3)
+        ))
+
+        # Add Budget line
+        fig.add_trace(go.Scatter(
+            x=month_labels,
+            y=budget_values,
+            name='Budget',
+            line=dict(color='#000000', width=3)
         ))
 
         # Add savings line
@@ -2585,7 +2605,7 @@ else:
             with cat_tab2:
                 st.subheader("Manual Category Assignments")
                 st.markdown("""
-                These are exact matches for specific transaction descriptions. 
+                These are exact matches for specific transaction descriptions.
                 They override any pattern-based rules.
                 """)
 
