@@ -279,25 +279,25 @@ def load_all_transaction_data():
     all_data = []
 
     # Process Discover data
-    discover_files = list_files_in_user_folder("user_transactions_data/discover", st.session_state.username)
+    discover_files, _ = list_files_in_user_folder("user_transactions_data/discover", st.session_state.username)
     for file in discover_files:
         df = load_discover_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Capital One data
-    capital_one_files = list_files_in_user_folder("user_transactions_data/Venture_X", st.session_state.username)
+    capital_one_files, _ = list_files_in_user_folder("user_transactions_data/Venture_X", st.session_state.username)
     for file in capital_one_files:
         df = load_capital_one_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Saver One data
-    saver_one_files = list_files_in_user_folder("user_transactions_data/Saver_one", st.session_state.username)
+    saver_one_files, _ = list_files_in_user_folder("user_transactions_data/Saver_one", st.session_state.username)
     for file in saver_one_files:
         df = load_saver_one_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Bilt data
-    bilt_files = list_files_in_user_folder("user_transactions_data/bilt", st.session_state.username)
+    bilt_files, _ = list_files_in_user_folder("user_transactions_data/bilt", st.session_state.username)
     for file in bilt_files:
         df = load_bilt_data(st.session_state.username, file)
         all_data.append(df)
@@ -314,7 +314,8 @@ def load_all_transaction_data():
 
         # Sort by date
         combined_data = combined_data.sort_values('Date')
-        return combined_data
+        unique_combined_data = combined_data.drop_duplicates()
+        return unique_combined_data
     return pd.DataFrame()
 
 def identify_related_refunds(df):
@@ -1788,25 +1789,135 @@ else:
             ]
 
             if not month_expenses.empty:
-                # Group by category
+                # ---------------- New logic: Compute Budget vs Actual by Category ----------------
+                # Group actual (variable) expenses by Enhanced_Category
                 category_expenses = month_expenses.groupby('Enhanced_Category')['Amount'].sum().reset_index()
-                category_expenses = category_expenses.sort_values('Amount', ascending=False)
+                category_expenses.rename(columns={'Enhanced_Category': 'Category', 'Amount': 'Expenses'}, inplace=True)
 
-                fig_bar = px.bar(
-                    category_expenses,
-                    x='Enhanced_Category',
-                    y='Amount',
-                    title=f'Expenses by Category for {calendar.month_name[selected_month]} {selected_year}',
-                    color='Enhanced_Category',
-                    labels={'Enhanced_Category': 'Category', 'Amount': 'Amount ($)'}
-                )
+                # Merge in active recurring payments (frequency-normalized) excluding category 'Savings'
+                if 'recurring_payments' in locals() and not recurring_payments.empty and 'category' in recurring_payments.columns:
+                    rp_active = recurring_payments.copy()
+                    # Date parsing (coerce invalid to NaT)
+                    if 'start_month' in rp_active.columns:
+                        rp_active['start_month'] = pd.to_datetime(rp_active['start_month'], errors='coerce')
+                    if 'end_month' in rp_active.columns:
+                        rp_active['end_month'] = pd.to_datetime(rp_active['end_month'], errors='coerce')
+
+                    # Filter to payments active for selected month
+                    rp_active = rp_active[
+                        ((rp_active['start_month'].isna()) | (rp_active['start_month'] <= selected_date_ts)) &
+                        ((rp_active['end_month'].isna()) | (rp_active['end_month'] >= selected_date_ts))
+                    ]
+
+                    if not rp_active.empty:
+                        # Exclude Savings (case-insensitive, handle NaNs)
+                        rp_active['category'] = rp_active['category'].fillna('')
+                        rp_active = rp_active[rp_active['category'].str.lower() != 'savings']
+
+                        if not rp_active.empty:
+                            # Normalize amount per month using existing helper
+                            rp_active['Monthly_Amount'] = rp_active.apply(lambda r: calculate_monthly_payment(r['amount'], r['frequency']), axis=1)
+                            rp_by_cat = rp_active.groupby('category')['Monthly_Amount'].sum().reset_index()
+                            rp_by_cat.rename(columns={'category': 'Category', 'Monthly_Amount': 'Recurring'}, inplace=True)
+
+                            # Outer merge to include categories that only have recurring payments
+                            category_expenses = category_expenses.merge(rp_by_cat, on='Category', how='outer')
+                            category_expenses['Expenses'] = category_expenses['Expenses'].fillna(0.0) + category_expenses['Recurring'].fillna(0.0)
+                            category_expenses.drop(columns=['Recurring'], inplace=True)
+                # ---------------- End merge of recurring payments ----------------
+
+                # Prepare monthly budget by category for the selected month
+                category_budgets = pd.DataFrame(columns=['Category', 'Budget'])
+                if 'category' in monthly_budget_df.columns and not monthly_budget_df.empty:
+                    budget_active = monthly_budget_df.copy()
+                    # Convert dates to datetime for comparison
+                    if 'start_month' in budget_active.columns:
+                        budget_active['start_month'] = pd.to_datetime(budget_active['start_month'], errors='coerce')
+                    if 'end_month' in budget_active.columns:
+                        budget_active['end_month'] = pd.to_datetime(budget_active['end_month'], errors='coerce')
+
+                    # Filter active budget items for the selected month
+                    budget_active = budget_active[
+                        ((budget_active['start_month'].isna()) | (budget_active['start_month'] <= selected_date_ts)) &
+                        ((budget_active['end_month'].isna()) | (budget_active['end_month'] >= selected_date_ts))
+                    ]
+
+                    if not budget_active.empty:
+                        # Calculate the effective monthly amount for each budget line using existing helper
+                        budget_active['Monthly_Amount'] = budget_active.apply(
+                            lambda row: calculate_monthly_payment(row['amount'], row['frequency']), axis=1
+                        )
+                        category_budgets = budget_active.groupby('category')['Monthly_Amount'].sum().reset_index()
+                        category_budgets.rename(columns={'category': 'Category', 'Monthly_Amount': 'Budget'}, inplace=True)
+
+                # Merge budgets and expenses (union of categories)
+                combined = pd.merge(category_budgets, category_expenses, on='Category', how='outer')
+                combined['Budget'] = combined['Budget'].fillna(0.0)
+                combined['Expenses'] = combined['Expenses'].fillna(0.0)
+                combined['Variance'] = combined['Budget'] - combined['Expenses']  # Positive = Under budget
+
+                # Sort categories by highest Expenses (fallback to Budget if equal)
+                combined.sort_values(['Expenses', 'Budget'], ascending=[False, False], inplace=True)
+
+                # Build grouped bar chart Budget vs Expenses
+                fig_bar = go.Figure()
+                fig_bar.add_trace(go.Bar(
+                    x=combined['Category'],
+                    y=combined['Budget'],
+                    name='Budget',
+                    marker_color='#1f77b4',
+                    hovertemplate='<b>%{x}</b><br>Budget: $%{y:.2f}<extra></extra>'
+                ))
+                fig_bar.add_trace(go.Bar(
+                    x=combined['Category'],
+                    y=combined['Expenses'],
+                    name='Expenses',
+                    marker_color='#d62728',
+                    hovertemplate='<b>%{x}</b><br>Expenses: $%{y:.2f}<extra></extra>'
+                ))
+
+                # Add variance annotations (optional small text above bars)
+                annotations = []
+                for idx, row in combined.iterrows():
+                    variance_text = f"Δ ${(row['Variance']):.0f}" if row['Variance'] != 0 else ""
+                    if variance_text:
+                        annotations.append(dict(
+                            x=row['Category'],
+                            y=max(row['Budget'], row['Expenses']) * 1.02,
+                            text=variance_text,
+                            showarrow=False,
+                            font=dict(size=10, color='#333')
+                        ))
 
                 fig_bar.update_layout(
+                    title=f'Budget vs Actual Expenses by Category - {calendar.month_name[selected_month]} {selected_year}',
+                    xaxis_title='Category',
+                    yaxis_title='Amount ($)',
+                    barmode='group',
                     xaxis_tickangle=-45,
-                    plot_bgcolor='rgba(0,0,0,0)'
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+                    annotations=annotations,
+                    margin=dict(t=80)
+                )
+
+                # Add variance hover info via customdata
+                fig_bar.update_traces(
+                    selector=dict(name='Expenses'),
+                    hovertemplate='<b>%{x}</b><br>Expenses: $%{y:.2f}<br>' +
+                                  'Budget: $%{customdata[0]:.2f}<br>Variance: $%{customdata[1]:.2f}<extra></extra>',
+                    customdata=np.stack((combined['Budget'], combined['Variance']), axis=-1)
+                )
+                fig_bar.update_traces(
+                    selector=dict(name='Budget'),
+                    hovertemplate='<b>%{x}</b><br>Budget: $%{y:.2f}<br>' +
+                                  'Expenses: $%{customdata[0]:.2f}<br>Variance: $%{customdata[1]:.2f}<extra></extra>',
+                    customdata=np.stack((combined['Expenses'], combined['Variance']), axis=-1)
                 )
 
                 st.plotly_chart(fig_bar, use_container_width=True)
+                st.caption('Variance = Budget - Expenses (positive means under budget)')
+                # ------------------------------------------------------------------------------
             else:
                 st.info(f"No expense data available for {calendar.month_name[selected_month]} {selected_year}")
         else:
@@ -2771,15 +2882,16 @@ else:
             # Get folders from S3 instead of local directory
             try:
                 # List all files in the user's transaction data directory
-                all_s3_files = list_files_in_user_folder(data_dir, username)
+                _ , all_s3_files = list_files_in_user_folder(data_dir, username)
 
                 # Extract unique folder names from file paths
                 folders = set()
                 for file_path in all_s3_files:
                     if '/' in file_path:
-                        folder_name = file_path.split('/')[0]
+                        folder_name = file_path.split('/')[-2]
                         folders.add(folder_name)
                 folders = list(folders)
+                st.write(folders)
             except Exception as e:
                 st.error(f"Error retrieving folders: {str(e)}")
                 folders = []

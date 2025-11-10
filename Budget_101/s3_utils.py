@@ -161,17 +161,19 @@ def list_files_in_user_folder(subfolder, username):
 
         if 'Contents' not in response:
             print(f"No contents found for prefix: {prefix}")
-            return []
+            return [], []
 
         # Extract file names without the full path
         files = []
+        files_fullpath = []
         for item in response['Contents']:
             key = item['Key']
             file_name = key.split('/')[-1]
             if file_name and file_name != '.placeholder':
                 files.append(file_name)
+            files_fullpath.append(key.split(prefix)[-1])
 
-        return files
+        return files, files_fullpath
     except ClientError as e:
         print(f"Error listing files from S3: {e}")
-        return []
+        return [], []
