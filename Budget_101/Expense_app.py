@@ -576,6 +576,7 @@ def load_recurring_payments():
     # If we reach here, either the file doesn't exist or there was an error
     return pd.DataFrame(columns=['description', 'amount', 'frequency', 'category', 'start_month', 'end_month', 'sub_category', 'id'])
 
+
 # Function to save income data
 def save_income_data(df):
     # Get username from session state
@@ -831,6 +832,20 @@ def save_monthly_budget(df):
     except Exception as e:
         print(f"Error saving monthly budget to S3: {e}")
 
+# Helper to render a labeled currency amount with color based on sign (positive green, negative red)
+def render_colored_amount(label: str, amount: float):
+    color = 'green' if amount >= 0 else 'red'
+    st.markdown(
+        f"<div style='font-size:20px;font-weight:600;margin-bottom:4px;'>{label}: "
+        f"</div>",
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        f"<div style='font-size:25px;font-weight:600;margin-bottom:4px;'>"
+        f"<span style='color:{color};font-size:35px;'>${amount:,.2f}</span></div>",
+        unsafe_allow_html=True
+    )
+
 # Application title and description
 st.title("💰 Family Expense Tracker")
 st.markdown("""
@@ -849,93 +864,133 @@ if not all_transactions.empty:
 
 # Sidebar for quick access to income and recurring payments
 with st.sidebar:
-    st.header("Quick Actions")
+    st.header("Quick Overview")
 
     # Load income and payment data for sidebar display
     income_data = load_income_data()
     recurring_payments = load_recurring_payments()
+    monthly_budget = load_monthly_budget()
 
-    # Calculate total monthly income from active sources only
-    if not income_data.empty:
-        # Use calculate_active_monthly_income which filters based on current date
-        current_date = pd.Timestamp(datetime.now().date())
-        total_monthly_income = calculate_active_monthly_income(income_data, current_date)
-        st.metric("Total Monthly Income", f"${total_monthly_income:.2f}")
+    c1 = st.container(border=True)
+    with c1:
+        # Calculate total monthly income from active sources only
+        if not income_data.empty:
+            # Use calculate_active_monthly_income which filters based on current date
+            current_date = pd.Timestamp(datetime.now().date())
+            total_monthly_income = calculate_active_monthly_income(income_data, current_date)
+            st.metric("Total Monthly Income", f"${total_monthly_income:.2f}")
 
-        # Show count of active income sources - fix the comparison issue here
-        # Convert dates to proper timestamps for comparison
-        income_data_copy = income_data.copy()
-        if 'start_month' in income_data_copy.columns:
-            income_data_copy['start_month'] = pd.to_datetime(income_data_copy['start_month'])
-        if 'end_month' in income_data_copy.columns:
-            income_data_copy['end_month'] = pd.to_datetime(income_data_copy['end_month'])
+            # Show count of active income sources - fix the comparison issue here
+            # Convert dates to proper timestamps for comparison
+            income_data_copy = income_data.copy()
+            if 'start_month' in income_data_copy.columns:
+                income_data_copy['start_month'] = pd.to_datetime(income_data_copy['start_month'])
+            if 'end_month' in income_data_copy.columns:
+                income_data_copy['end_month'] = pd.to_datetime(income_data_copy['end_month'])
 
-        # Now do the comparison with consistent types
-        active_sources = len(income_data_copy[
-            ((pd.isna(income_data_copy['start_month'])) | (income_data_copy['start_month'] <= current_date)) &
-            ((pd.isna(income_data_copy['end_month'])) | (income_data_copy['end_month'] >= current_date))
-        ])
-        st.caption(f"Based on {active_sources} active income sources")
-
-    # Calculate total monthly recurring payments
-    if not recurring_payments.empty:
-        # Use calculate_active_monthly_payments which filters based on current date
-        total_monthly_payments = calculate_active_monthly_payments(recurring_payments, current_date)
-        st.metric("Total Monthly Fixed Expenses", f"${total_monthly_payments:.2f}")
-
-        # Show count of active payments
-        if 'start_month' in recurring_payments.columns and 'end_month' in recurring_payments.columns:
-            payments_copy = recurring_payments.copy()
-            payments_copy['start_month'] = pd.to_datetime(payments_copy['start_month'])
-            payments_copy['end_month'] = pd.to_datetime(payments_copy['end_month'])
-
-            active_payments = len(payments_copy[
-                ((pd.isna(payments_copy['start_month'])) | (payments_copy['start_month'] <= current_date)) &
-                ((pd.isna(payments_copy['end_month'])) | (payments_copy['end_month'] >= current_date))
+            # Now do the comparison with consistent types
+            active_sources = len(income_data_copy[
+                ((pd.isna(income_data_copy['start_month'])) | (income_data_copy['start_month'] <= current_date)) &
+                ((pd.isna(income_data_copy['end_month'])) | (income_data_copy['end_month'] >= current_date))
             ])
-            st.caption(f"Based on {active_payments} active recurring payments")
+            st.caption(f"Based on {active_sources} active income sources")
 
-    # Get current month's variable expenses
-    current_month_start = pd.Timestamp(datetime.now().year, datetime.now().month, 1)
-    if datetime.now().month == 12:
-        current_month_end = pd.Timestamp(datetime.now().year + 1, 1, 1) - pd.Timedelta(days=1)
-    else:
-        current_month_end = pd.Timestamp(datetime.now().year, datetime.now().month + 1, 1) - pd.Timedelta(days=1)
+        # Calculate total monthly recurring payments
+        if not monthly_budget.empty:
+            # Use calculate_active_monthly_payments which filters based on current date
+            total_monthly_budget = calculate_active_monthly_payments(monthly_budget, current_date)
+            st.metric("Total Monthly Budget", f"${total_monthly_budget:.2f}")
 
-    # Initialize with zero in case there's no transaction data
-    total_variable_expenses = 0.0
+            # Show count of active payments
+            if 'start_month' in monthly_budget.columns and 'end_month' in monthly_budget.columns:
+                payments_copy = monthly_budget.copy()
+                payments_copy['start_month'] = pd.to_datetime(payments_copy['start_month'])
+                payments_copy['end_month'] = pd.to_datetime(payments_copy['end_month'])
 
-    # Only calculate if we have transaction data loaded
-    if 'expenses_only' in locals() and not expenses_only.empty:
-        # Filter to current month
-        current_month_expenses = expenses_only[
-            (expenses_only['Date'] >= current_month_start) &
-            (expenses_only['Date'] <= current_month_end)
-        ]
+                active_budget_items = len(payments_copy[
+                                          ((pd.isna(payments_copy['start_month'])) | (
+                                                      payments_copy['start_month'] <= current_date)) &
+                                          ((pd.isna(payments_copy['end_month'])) | (
+                                                      payments_copy['end_month'] >= current_date))
+                                          ])
+                st.caption(f"Based on {active_budget_items} active recurring budget items")
 
-        # Sum up the variable expenses for current month
-        if not current_month_expenses.empty:
-            total_variable_expenses = current_month_expenses['Amount'].sum()
+        # Calculate total monthly recurring payments
+        if not recurring_payments.empty:
+            # Use calculate_active_monthly_payments which filters based on current date
+            total_monthly_payments = calculate_active_monthly_payments(recurring_payments, current_date)
+            st.metric("Total Monthly Fixed Expenses", f"${total_monthly_payments:.2f}")
 
-    # Show variable expenses in the sidebar
-    st.metric("Current Month Variable Expenses", f"${total_variable_expenses:.2f}")
+            # Show count of active payments
+            if 'start_month' in recurring_payments.columns and 'end_month' in recurring_payments.columns:
+                payments_copy = recurring_payments.copy()
+                payments_copy['start_month'] = pd.to_datetime(payments_copy['start_month'])
+                payments_copy['end_month'] = pd.to_datetime(payments_copy['end_month'])
 
-    # Show estimated remaining budget if both income and payments exist
-    if not income_data.empty:
-        # Calculate actual remaining budget including variable expenses
-        remaining_budget = total_monthly_income - total_monthly_payments - total_variable_expenses
-        st.metric("Remaining Budget (after all expenses)",
-                 f"${remaining_budget:.2f}",
-                 delta=None)
+                active_payments = len(payments_copy[
+                    ((pd.isna(payments_copy['start_month'])) | (payments_copy['start_month'] <= current_date)) &
+                    ((pd.isna(payments_copy['end_month'])) | (payments_copy['end_month'] >= current_date))
+                ])
+                st.caption(f"Based on {active_payments} active recurring payments")
 
-        # Show percent of income spent
-        if total_monthly_income > 0:
-            spending_percent = ((total_monthly_payments + total_variable_expenses) / total_monthly_income) * 100
-            savings_percent = 100 - spending_percent
-            st.caption(f"You've spent {spending_percent:.1f}% of your income this month")
+        # Get current month's variable expenses
+        current_month_start = pd.Timestamp(datetime.now().year, datetime.now().month, 1)
+        if datetime.now().month == 12:
+            current_month_end = pd.Timestamp(datetime.now().year + 1, 1, 1) - pd.Timedelta(days=1)
+        else:
+            current_month_end = pd.Timestamp(datetime.now().year, datetime.now().month + 1, 1) - pd.Timedelta(days=1)
 
-            # Add a simple progress bar
-            st.progress(min(spending_percent/100, 1.0), f"Saving {savings_percent:.1f}%")
+        # Initialize with zero in case there's no transaction data
+        total_variable_expenses = 0.0
+
+        # Only calculate if we have transaction data loaded
+        if 'expenses_only' in locals() and not expenses_only.empty:
+            # Filter to current month
+            current_month_expenses = expenses_only[
+                (expenses_only['Date'] >= current_month_start) &
+                (expenses_only['Date'] <= current_month_end)
+            ]
+
+            # Sum up the variable expenses for current month
+            if not current_month_expenses.empty:
+                total_variable_expenses = current_month_expenses['Amount'].sum()
+
+        # Show variable expenses in the sidebar
+        st.metric("Current Month Variable Expenses", f"${total_variable_expenses:.2f}")
+
+    c2 = st.container(border=True)
+    with c2:
+        # Show estimated remaining budget if both income and payments exist
+        if not monthly_budget.empty:
+            # Calculate actual remaining budget including variable expenses
+            remaining_budget = total_monthly_budget - total_monthly_payments - total_variable_expenses
+
+            # Colored display replacing st.metric
+            render_colored_amount("Remaining Budget (after all expenses)", remaining_budget)
+
+            # Show percent of income spent
+            if total_monthly_budget > 0:
+                spending_percent = ((total_monthly_payments + total_variable_expenses) / total_monthly_budget) * 100
+                savings_percent = 100 - spending_percent
+                st.caption(f"You've spent {spending_percent:.1f}% of your budget this month")
+
+                # Add a simple progress bar
+                st.progress(min(spending_percent/100, 1.0), f"Saving {savings_percent:.1f}%")
+            # Show estimated remaining budget if both income and payments exist
+
+        if not income_data.empty:
+            # Calculate actual remaining income including variable expenses
+            remaining_income = total_monthly_income - total_monthly_payments - total_variable_expenses
+            render_colored_amount("Remaining Income (after all expenses)", remaining_income)
+
+            # Show percent of income spent
+            if total_monthly_income > 0:
+                spending_percent = ((total_monthly_payments + total_variable_expenses) / total_monthly_income) * 100
+                savings_percent = 100 - spending_percent
+                st.caption(f"You've spent {spending_percent:.1f}% of your income this month")
+
+                # Add a simple progress bar
+                st.progress(min(spending_percent / 100, 1.0), f"Saving {savings_percent:.1f}%")
 
     # Add some spacing
     st.write("---")
@@ -1415,28 +1470,42 @@ else:
 
         with st.form("monthly_budget_form"):
             description_b = st.text_input("Description", value=st.session_state.get('edit_budget_description',''))
-            amount_b = st.number_input("Amount", min_value=0.0, format='%.2f', value=float(st.session_state.get('edit_budget_amount', 0.0)))
+            amount_b = st.number_input("Amount", min_value=0.0, format='%.2f', value=float(st.session_state.get('edit_budget_amount', 0.0)), key=f"budget_amount_{st.session_state.get('edit_budget_id', 'new')}")
             freq_opts = ["Monthly","Bi-weekly","Weekly","Yearly","Quarterly"]
-            frequency_b = st.selectbox("Frequency", freq_opts, index=freq_opts.index(st.session_state.get('edit_budget_frequency','Monthly')) if st.session_state.get('edit_budget_frequency','Monthly') in freq_opts else 0)
+            frequency_b = st.selectbox("Frequency", freq_opts, index=freq_opts.index(st.session_state.get('edit_budget_frequency','Monthly')) if st.session_state.get('edit_budget_frequency','Monthly') in freq_opts else 0,
+                                       key=f"budget_frequency_{st.session_state.get('edit_budget_id', 'new')}")
             category_b = st.text_input("Category", value=st.session_state.get('edit_budget_category',''))
             sub_category_b = st.text_input("Sub-category", value=st.session_state.get('edit_budget_sub_category',''))
-            payment_type_b = st.selectbox("Payment Type", ["Fixed","Variable"], index=["Fixed","Variable"].index(st.session_state.get('edit_budget_payment_type','Fixed')))
+            payment_type_b = st.selectbox("Payment Type", ["Fixed","Variable"], index=["Fixed","Variable"].index(st.session_state.get('edit_budget_payment_type','Fixed')),
+                                          key=f"budget_payment_type_{st.session_state.get('edit_budget_id', 'new')}")
             # Dates
             start_default_b = st.session_state.get('edit_budget_start_month', datetime.now().replace(day=1).date())
-            start_month_b = st.date_input("Start Month", value=start_default_b, key="budget_start_month_input")
+            start_month_b = st.date_input("Start Month", value=start_default_b,
+                                          key=f"budget_start_{st.session_state.get('edit_budget_id', 'new')}" )
             end_month_b = None
             if budget_end_month_toggle:
                 end_default_b = st.session_state.get('edit_budget_end_month', datetime.now().replace(day=1).date())
-                end_month_b = st.date_input("End Month", value=end_default_b, key="budget_end_month_input")
+                end_month_b = st.date_input("End Month", value=end_default_b, key=f"budget_end_{st.session_state.get('edit_budget_id', 'new')}")
             clear_budget = st.form_submit_button("Clear Form")
             if clear_budget:
                 for k in ['edit_budget','edit_budget_id','edit_budget_description','edit_budget_amount','edit_budget_frequency','edit_budget_category','edit_budget_sub_category','edit_budget_payment_type','edit_budget_start_month','edit_budget_end_month']:
                     if k in st.session_state:
                         st.session_state.pop(k)
+                keys_tuple = tuple([
+                    'budget_description', 'budget_amount', 'budget_frequency', 'budget_category',
+                    'budget_sub_category', 'budget_payment_type', 'budget_start_month', 'budget_end_month',
+                    'budget_end_date_enabled'
+                ])
+                keys_to_delete = [key for key in st.session_state.keys() if key.startswith(keys_tuple)]
+                st.write("keys_to_delete", keys_to_delete)
+                for k in keys_to_delete:
+                    st.session_state.pop(k, None)
                 st.session_state.budget_end_date_enabled = False
+                st.write("key: ", st.session_state.get('budget_amount_new', 0.0))
                 st.rerun()
             submit_budget = st.form_submit_button("Save Budget Item")
             if submit_budget and description_b and amount_b > 0:
+                st.write("in here")
                 start_str_b = start_month_b.strftime('%Y-%m-%d') if start_month_b else None
                 end_str_b = end_month_b.strftime('%Y-%m-%d') if budget_end_month_toggle and end_month_b else None
                 if st.session_state.get('edit_budget', False):
@@ -1469,6 +1538,20 @@ else:
                     })
                     monthly_budget_df = pd.concat([monthly_budget_df, new_row_b], ignore_index=True)
                     st.success(f"Added new budget item: {description_b}")
+                    keys_tuple = tuple([
+                        'budget_description', 'budget_amount', 'budget_frequency', 'budget_category',
+                        'budget_sub_category', 'budget_payment_type', 'budget_start_month', 'budget_end_month',
+                        'budget_end_date_enabled'
+                    ])
+                    for k in [key for key in st.session_state.keys() if key.startswith(keys_tuple)]:
+                        st.session_state.pop(k, None)
+                    # Edit prefill keys (safe to remove if present)
+                    for k in [
+                        'edit_budget', 'edit_budget_id', 'edit_budget_description', 'edit_budget_amount',
+                        'edit_budget_frequency', 'edit_budget_category', 'edit_budget_sub_category',
+                        'edit_budget_payment_type', 'edit_budget_start_month', 'edit_budget_end_month'
+                    ]:
+                        st.session_state.pop(k, None)
                 save_monthly_budget(monthly_budget_df)
                 st.rerun()
 
@@ -1545,7 +1628,8 @@ else:
             st.metric("Variable Expenses", f"${monthly_expenses:.2f}")
 
         with col3:
-            st.metric("Remaining Budget", f"${remaining_budget:.2f}")
+            # Colored remaining budget instead of st.metric
+            render_colored_amount("Remaining Budget", remaining_budget)
             st.caption(f"For {calendar.month_name[selected_month]} {selected_year}")
 
         # Monthly income, expense, and savings breakdown
