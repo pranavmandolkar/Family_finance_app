@@ -919,12 +919,13 @@ with st.sidebar:
         # Calculate total monthly recurring payments
         if not recurring_payments.empty:
             # Use calculate_active_monthly_payments which filters based on current date
-            total_monthly_payments = calculate_active_monthly_payments(recurring_payments, current_date)
+            recurring_payments_wo_savings = recurring_payments[recurring_payments["category"] != "Savings"]
+            total_monthly_payments = calculate_active_monthly_payments(recurring_payments_wo_savings, current_date)
             st.metric("Total Monthly Fixed Expenses", f"${total_monthly_payments:.2f}")
 
             # Show count of active payments
-            if 'start_month' in recurring_payments.columns and 'end_month' in recurring_payments.columns:
-                payments_copy = recurring_payments.copy()
+            if 'start_month' in recurring_payments_wo_savings.columns and 'end_month' in recurring_payments_wo_savings.columns:
+                payments_copy = recurring_payments_wo_savings.copy()
                 payments_copy['start_month'] = pd.to_datetime(payments_copy['start_month'])
                 payments_copy['end_month'] = pd.to_datetime(payments_copy['end_month'])
 
@@ -2874,24 +2875,22 @@ else:
             This will make your transaction data available for analysis in the application.
             """)
 
-            # Get list of existing folders in user_transactions_data directory
-            # Use S3 storage instead of local filesystem
+            # Get list of existing folders in user_transactions_data directory via S3
             username = st.session_state.username
             data_dir = 'user_transactions_data'
 
-            # Get folders from S3 instead of local directory
             try:
-                # List all files in the user's transaction data directory
-                _ , all_s3_files = list_files_in_user_folder(data_dir, username)
+                # List all files (keys) in the user's transaction data directory
+                _, all_s3_files = list_files_in_user_folder(data_dir, username)
 
                 # Extract unique folder names from file paths
                 folders = set()
                 for file_path in all_s3_files:
-                    if '/' in file_path:
-                        folder_name = file_path.split('/')[-2]
-                        folders.add(folder_name)
-                folders = list(folders)
-                st.write(folders)
+                    # Expect relative paths like 'discover/file.csv'
+                    parts = file_path.split('/')
+                    if len(parts) > 1:  # has a subfolder
+                        folders.add(parts[0])
+                folders = sorted(list(folders))
             except Exception as e:
                 st.error(f"Error retrieving folders: {str(e)}")
                 folders = []
@@ -2900,19 +2899,16 @@ else:
             create_new_folder = st.checkbox("Create a new bank folder")
 
             if create_new_folder:
-                # New folder creation
                 new_folder_name = st.text_input("Enter new bank/folder name:")
                 if new_folder_name:
-                    if new_folder_name not in folders and new_folder_name != '':
+                    if new_folder_name not in folders and new_folder_name.strip() != '':
                         if st.button("Create Folder"):
                             try:
-                                # Create a placeholder file in S3 to represent the new folder
+                                # Create placeholder file to realize the folder in S3
                                 from s3_utils import write_file_to_s3
                                 write_file_to_s3(username, f"{new_folder_name}/.placeholder", "")
                                 st.success(f"Successfully created folder: {new_folder_name}")
-                                # Add the new folder to the list
                                 folders.append(new_folder_name)
-                                # Force a rerun to update the folder list
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Error creating folder: {str(e)}")
@@ -2934,70 +2930,81 @@ else:
             uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
             if uploaded_file is not None:
-                # Display file details
-                file_details = {
-                    "Filename": uploaded_file.name,
-                    "File size": f"{uploaded_file.size / 1024:.2f} KB"
-                }
-                st.write(file_details)
+                if not selected_folder:
+                    st.warning("Please select or create a folder before uploading a file.")
+                else:
+                    file_details = {
+                        "Filename": uploaded_file.name,
+                        "File size": f"{uploaded_file.size / 1024:.2f} KB"
+                    }
+                    st.write(file_details)
 
-                # Preview the CSV
-                try:
-                    df = pd.read_csv(uploaded_file)
-                    st.write("Preview of the uploaded file:")
-                    st.dataframe(df.head(5))
+                    # Preview
+                    try:
 
-                    # Check if file with same name exists
-                    target_path = os.path.join(data_dir, selected_folder, uploaded_file.name)
-                    file_exists = os.path.exists(target_path)
+                        df_preview = pd.read_csv(uploaded_file)
+                        if selected_folder.lower() == "bilt":
+                            df_preview = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                     names=["Transaction Date",
+                                                                                          "Debit/Credit",
+                                                                                          "Reference Number",
+                                                                                          "Card No.",
+                                                                                          "Description"])
+
+                        st.write("Preview of the uploaded file:")
+                        st.dataframe(df_preview.head(5), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Error reading the CSV file: {str(e)}")
+                        st.stop()
+
+                    # Check if file exists in S3
+                    from s3_utils import s3_file_exists
+                    s3_key = f"{username}/{data_dir}/{selected_folder}/{uploaded_file.name}"
+                    file_exists = s3_file_exists(s3_key)
 
                     if file_exists:
                         overwrite = st.checkbox("A file with this name already exists. Overwrite?")
                         if not overwrite:
                             st.stop()
 
-                    # Save button
                     if st.button("Save File"):
                         try:
-                            # Save the uploaded file
-                            with open(target_path, "wb") as f:
-                                f.write(uploaded_file.getbuffer())
-                            st.success(f"Successfully saved {uploaded_file.name} to {selected_folder} folder!")
-
-                            # Show current files in the selected folder
-                            st.subheader(f"Current files in {selected_folder}:")
-                            folder_files = [f for f in os.listdir(os.path.join(data_dir, selected_folder))
-                                           if os.path.isfile(os.path.join(data_dir, selected_folder, f))]
-                            st.write(folder_files)
-
+                            from s3_utils import write_file_to_s3
+                            # write_file_to_s3 expects (username, relative_path, content_string)
+                            # Relative path inside user_transactions_data/<folder>/<file>
+                            content_str = uploaded_file.getvalue().decode('utf-8')
+                            # If Bilt folder, enforce headers when saving
+                            if selected_folder and selected_folder.lower() == "bilt":
+                                try:
+                                    # df_preview already has correct headers assigned above
+                                    content_str = df_preview.to_csv(index=False)
+                                except Exception:
+                                    # Fallback: re-read and assign headers explicitly
+                                    bilt_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                          names=["Transaction Date",
+                                                                 "Debit/Credit",
+                                                                 "Reference Number",
+                                                                 "Card No.",
+                                                                 "Description"])
+                                    content_str = bilt_df.to_csv(index=False)
+                            write_file_to_s3(username, f"{selected_folder}/{uploaded_file.name}", content_str)
+                            st.success(f"Successfully saved {uploaded_file.name} to {selected_folder} folder in S3!")
+                            st.rerun()
                         except Exception as e:
-                            st.error(f"Error saving file: {str(e)}")
-                except Exception as e:
-                    st.error(f"Error reading the CSV file: {str(e)}")
+                            st.error(f"Error saving file to S3: {str(e)}")
 
-            # Display existing files in folders
+            # Display existing files in folders from S3
             st.subheader("Existing Transaction Files")
-
-            # Create an expandable section for each folder
-            for folder in folders:
-                with st.expander(f"{folder.capitalize()} Files"):
-                    folder_path = os.path.join(data_dir, folder)
-                    files = [f for f in os.listdir(folder_path)
-                            if os.path.isfile(os.path.join(folder_path, f))]
-
-                    if files:
-                        # Create a table for files with their details
-                        file_data = []
-                        for filename in files:
-                            file_path = os.path.join(folder_path, filename)
-                            size_kb = os.path.getsize(file_path) / 1024
-                            mod_time = os.path.getmtime(file_path)
-                            mod_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
-                            file_data.append({"Filename": filename, "Size (KB)": f"{size_kb:.2f}", "Last Modified": mod_date})
-
-                        # Create a dataframe and display
-                        if file_data:
-                            files_df = pd.DataFrame(file_data)
-                            st.dataframe(files_df, use_container_width=True, hide_index=True)
-                    else:
-                        st.info(f"No files in {folder} folder.")
+            if not folders:
+                st.info("No folders available.")
+            else:
+                for folder in folders:
+                    with st.expander(f"{folder.capitalize()} Files"):
+                        # List files in this specific folder
+                        files, rel_paths = list_files_in_user_folder(f"user_transactions_data/{folder}", username)
+                        # Filter out placeholder
+                        display_files = [f for f in files if f != '.placeholder']
+                        if display_files:
+                            st.write(display_files)
+                        else:
+                            st.info(f"No files in {folder} folder.")

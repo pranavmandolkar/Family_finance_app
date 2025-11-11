@@ -133,25 +133,25 @@ def list_files_in_user_folder(subfolder, username):
     List files in a user's folder on S3
 
     Args:
-        subfolder: The subfolder path (e.g. "user_transactions_data/discover")
+        subfolder: The subfolder path (e.g. "user_transactions_data/discover" or "user_transactions_data")
         username: The username
 
     Returns:
-        List of filenames in the specified folder
+        Tuple[List of filenames, List of relative paths from the requested prefix]
     """
     s3_client = get_s3_client()
 
-    # Handle the case where subfolder already includes user_transactions_data
-    if "user_transactions_data" in subfolder:
-        # Extract the part after user_transactions_data
-        subfolder_parts = subfolder.split("user_transactions_data/")
-        if len(subfolder_parts) > 1:
-            subfolder_path = subfolder_parts[1]
-            prefix = f"{username}/user_transactions_data/{subfolder_path}/"
+    # Normalize subfolder handling for user_transactions_data
+    if subfolder.startswith("user_transactions_data"):
+        # Remove the leading base and any leading slashes after it
+        sub_path = subfolder[len("user_transactions_data"):].lstrip("/")
+        if sub_path:
+            prefix = f"{username}/user_transactions_data/{sub_path}/"
         else:
             prefix = f"{username}/user_transactions_data/"
     else:
-        prefix = f"{username}/{subfolder}/"
+        # Generic case (allow other top-level areas like core_app_data if needed)
+        prefix = f"{username}/{subfolder.rstrip('/')}/"
 
     try:
         response = s3_client.list_objects_v2(
@@ -163,15 +163,18 @@ def list_files_in_user_folder(subfolder, username):
             print(f"No contents found for prefix: {prefix}")
             return [], []
 
-        # Extract file names without the full path
         files = []
-        files_fullpath = []
+        files_fullpath = []  # relative paths after prefix
         for item in response['Contents']:
             key = item['Key']
-            file_name = key.split('/')[-1]
+            # Skip the prefix itself and placeholder files
+            if key.endswith('/'):
+                continue
+            rel_path = key[len(prefix):] if key.startswith(prefix) else key
+            file_name = rel_path.split('/')[-1]
             if file_name and file_name != '.placeholder':
                 files.append(file_name)
-            files_fullpath.append(key.split(prefix)[-1])
+            files_fullpath.append(rel_path)
 
         return files, files_fullpath
     except ClientError as e:
