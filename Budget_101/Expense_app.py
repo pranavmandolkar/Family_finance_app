@@ -1591,7 +1591,9 @@ else:
         active_monthly_income = calculate_active_monthly_income(income_data, selected_date_ts)
 
         # Calculate total monthly recurring payments for the selected month
-        active_monthly_payments = calculate_active_monthly_payments(recurring_payments, selected_date_ts)
+        recurring_payments_wo_savings = recurring_payments[recurring_payments["category"] != "Savings"]
+        active_monthly_payments = calculate_active_monthly_payments(recurring_payments_wo_savings, selected_date_ts)
+
 
         # calculate
         active_monthly_budget = calculate_active_monthly_payments(monthly_budget_df, selected_date_ts)
