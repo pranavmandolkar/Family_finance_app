@@ -279,25 +279,25 @@ def load_all_transaction_data():
     all_data = []
 
     # Process Discover data
-    discover_files = list_files_in_user_folder("user_transactions_data/discover", st.session_state.username)
+    discover_files, _ = list_files_in_user_folder("user_transactions_data/discover", st.session_state.username)
     for file in discover_files:
         df = load_discover_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Capital One data
-    capital_one_files = list_files_in_user_folder("user_transactions_data/Venture_X", st.session_state.username)
+    capital_one_files, _ = list_files_in_user_folder("user_transactions_data/Venture_X", st.session_state.username)
     for file in capital_one_files:
         df = load_capital_one_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Saver One data
-    saver_one_files = list_files_in_user_folder("user_transactions_data/Saver_one", st.session_state.username)
+    saver_one_files, _ = list_files_in_user_folder("user_transactions_data/Saver_one", st.session_state.username)
     for file in saver_one_files:
         df = load_saver_one_data(st.session_state.username, file)
         all_data.append(df)
 
     # Process Bilt data
-    bilt_files = list_files_in_user_folder("user_transactions_data/bilt", st.session_state.username)
+    bilt_files, _ = list_files_in_user_folder("user_transactions_data/bilt", st.session_state.username)
     for file in bilt_files:
         df = load_bilt_data(st.session_state.username, file)
         all_data.append(df)
@@ -314,7 +314,8 @@ def load_all_transaction_data():
 
         # Sort by date
         combined_data = combined_data.sort_values('Date')
-        return combined_data
+        unique_combined_data = combined_data.drop_duplicates()
+        return unique_combined_data
     return pd.DataFrame()
 
 def identify_related_refunds(df):
@@ -576,6 +577,7 @@ def load_recurring_payments():
     # If we reach here, either the file doesn't exist or there was an error
     return pd.DataFrame(columns=['description', 'amount', 'frequency', 'category', 'start_month', 'end_month', 'sub_category', 'id'])
 
+
 # Function to save income data
 def save_income_data(df):
     # Get username from session state
@@ -783,6 +785,68 @@ def calculate_active_monthly_payments(payment_data, reference_date=None):
 
     return 0.0
 
+# Function to load monthly budget data (similar structure to recurring payments)
+def load_monthly_budget():
+    username = st.session_state.username
+    budget_file_path = 'monthly_budget.csv'
+    try:
+        file_content = read_file_from_s3(username, budget_file_path)
+        if file_content is not None:
+            from io import StringIO
+            df = pd.read_csv(StringIO(file_content))
+            # Ensure required columns exist
+            required_cols = ['description','amount','frequency','category','sub_category','start_month','end_month','payment_type','id']
+            for col in required_cols:
+                if col not in df.columns:
+                    if col == 'payment_type':
+                        df[col] = 'Fixed'
+                    elif col == 'id':
+                        df[col] = [f"budget_{i}" for i in range(len(df))]
+                    else:
+                        df[col] = None
+            # Parse dates
+            if 'start_month' in df.columns:
+                df['start_month'] = pd.to_datetime(df['start_month'], errors='coerce').dt.date
+            if 'end_month' in df.columns:
+                df['end_month'] = pd.to_datetime(df['end_month'], errors='coerce').dt.date
+            # Guarantee ids
+            if 'id' in df.columns and df['id'].isna().any():
+                df.loc[df['id'].isna(),'id'] = [f"budget_{i}" for i in range(len(df[df['id'].isna()]))]
+            return df[required_cols]
+    except Exception as e:
+        print(f"Error loading monthly budget from S3: {e}")
+    return pd.DataFrame(columns=['description','amount','frequency','category','sub_category','start_month','end_month','payment_type','id'])
+
+# Function to save monthly budget data
+def save_monthly_budget(df):
+    username = st.session_state.username
+    budget_file_path = 'monthly_budget.csv'
+    save_df = df.copy()
+    # Normalize date columns
+    for col in ['start_month','end_month']:
+        if col in save_df.columns:
+            save_df[col] = save_df[col].apply(lambda x: pd.to_datetime(x).strftime('%Y-%m-%d') if pd.notna(x) else '')
+    try:
+        from s3_utils import write_file_to_s3
+        csv_content = save_df.to_csv(index=False)
+        write_file_to_s3(username, budget_file_path, csv_content)
+    except Exception as e:
+        print(f"Error saving monthly budget to S3: {e}")
+
+# Helper to render a labeled currency amount with color based on sign (positive green, negative red)
+def render_colored_amount(label: str, amount: float):
+    color = 'green' if amount >= 0 else 'red'
+    st.markdown(
+        f"<div style='font-size:20px;font-weight:600;margin-bottom:4px;'>{label}: "
+        f"</div>",
+        unsafe_allow_html=True
+    )
+    st.markdown(
+        f"<div style='font-size:25px;font-weight:600;margin-bottom:4px;'>"
+        f"<span style='color:{color};font-size:35px;'>${amount:,.2f}</span></div>",
+        unsafe_allow_html=True
+    )
+
 # Application title and description
 st.title("💰 Family Expense Tracker")
 st.markdown("""
@@ -801,93 +865,134 @@ if not all_transactions.empty:
 
 # Sidebar for quick access to income and recurring payments
 with st.sidebar:
-    st.header("Quick Actions")
+    st.header("Quick Overview")
 
     # Load income and payment data for sidebar display
     income_data = load_income_data()
     recurring_payments = load_recurring_payments()
+    monthly_budget = load_monthly_budget()
 
-    # Calculate total monthly income from active sources only
-    if not income_data.empty:
-        # Use calculate_active_monthly_income which filters based on current date
-        current_date = pd.Timestamp(datetime.now().date())
-        total_monthly_income = calculate_active_monthly_income(income_data, current_date)
-        st.metric("Total Monthly Income", f"${total_monthly_income:.2f}")
+    c1 = st.container(border=True)
+    with c1:
+        # Calculate total monthly income from active sources only
+        if not income_data.empty:
+            # Use calculate_active_monthly_income which filters based on current date
+            current_date = pd.Timestamp(datetime.now().date())
+            total_monthly_income = calculate_active_monthly_income(income_data, current_date)
+            st.metric("Total Monthly Income", f"${total_monthly_income:.2f}")
 
-        # Show count of active income sources - fix the comparison issue here
-        # Convert dates to proper timestamps for comparison
-        income_data_copy = income_data.copy()
-        if 'start_month' in income_data_copy.columns:
-            income_data_copy['start_month'] = pd.to_datetime(income_data_copy['start_month'])
-        if 'end_month' in income_data_copy.columns:
-            income_data_copy['end_month'] = pd.to_datetime(income_data_copy['end_month'])
+            # Show count of active income sources - fix the comparison issue here
+            # Convert dates to proper timestamps for comparison
+            income_data_copy = income_data.copy()
+            if 'start_month' in income_data_copy.columns:
+                income_data_copy['start_month'] = pd.to_datetime(income_data_copy['start_month'])
+            if 'end_month' in income_data_copy.columns:
+                income_data_copy['end_month'] = pd.to_datetime(income_data_copy['end_month'])
 
-        # Now do the comparison with consistent types
-        active_sources = len(income_data_copy[
-            ((pd.isna(income_data_copy['start_month'])) | (income_data_copy['start_month'] <= current_date)) &
-            ((pd.isna(income_data_copy['end_month'])) | (income_data_copy['end_month'] >= current_date))
-        ])
-        st.caption(f"Based on {active_sources} active income sources")
-
-    # Calculate total monthly recurring payments
-    if not recurring_payments.empty:
-        # Use calculate_active_monthly_payments which filters based on current date
-        total_monthly_payments = calculate_active_monthly_payments(recurring_payments, current_date)
-        st.metric("Total Monthly Fixed Expenses", f"${total_monthly_payments:.2f}")
-
-        # Show count of active payments
-        if 'start_month' in recurring_payments.columns and 'end_month' in recurring_payments.columns:
-            payments_copy = recurring_payments.copy()
-            payments_copy['start_month'] = pd.to_datetime(payments_copy['start_month'])
-            payments_copy['end_month'] = pd.to_datetime(payments_copy['end_month'])
-
-            active_payments = len(payments_copy[
-                ((pd.isna(payments_copy['start_month'])) | (payments_copy['start_month'] <= current_date)) &
-                ((pd.isna(payments_copy['end_month'])) | (payments_copy['end_month'] >= current_date))
+            # Now do the comparison with consistent types
+            active_sources = len(income_data_copy[
+                ((pd.isna(income_data_copy['start_month'])) | (income_data_copy['start_month'] <= current_date)) &
+                ((pd.isna(income_data_copy['end_month'])) | (income_data_copy['end_month'] >= current_date))
             ])
-            st.caption(f"Based on {active_payments} active recurring payments")
+            st.caption(f"Based on {active_sources} active income sources")
 
-    # Get current month's variable expenses
-    current_month_start = pd.Timestamp(datetime.now().year, datetime.now().month, 1)
-    if datetime.now().month == 12:
-        current_month_end = pd.Timestamp(datetime.now().year + 1, 1, 1) - pd.Timedelta(days=1)
-    else:
-        current_month_end = pd.Timestamp(datetime.now().year, datetime.now().month + 1, 1) - pd.Timedelta(days=1)
+        # Calculate total monthly recurring payments
+        if not monthly_budget.empty:
+            # Use calculate_active_monthly_payments which filters based on current date
+            total_monthly_budget = calculate_active_monthly_payments(monthly_budget, current_date)
+            st.metric("Total Monthly Budget", f"${total_monthly_budget:.2f}")
 
-    # Initialize with zero in case there's no transaction data
-    total_variable_expenses = 0.0
+            # Show count of active payments
+            if 'start_month' in monthly_budget.columns and 'end_month' in monthly_budget.columns:
+                payments_copy = monthly_budget.copy()
+                payments_copy['start_month'] = pd.to_datetime(payments_copy['start_month'])
+                payments_copy['end_month'] = pd.to_datetime(payments_copy['end_month'])
 
-    # Only calculate if we have transaction data loaded
-    if 'expenses_only' in locals() and not expenses_only.empty:
-        # Filter to current month
-        current_month_expenses = expenses_only[
-            (expenses_only['Date'] >= current_month_start) &
-            (expenses_only['Date'] <= current_month_end)
-        ]
+                active_budget_items = len(payments_copy[
+                                          ((pd.isna(payments_copy['start_month'])) | (
+                                                      payments_copy['start_month'] <= current_date)) &
+                                          ((pd.isna(payments_copy['end_month'])) | (
+                                                      payments_copy['end_month'] >= current_date))
+                                          ])
+                st.caption(f"Based on {active_budget_items} active recurring budget items")
 
-        # Sum up the variable expenses for current month
-        if not current_month_expenses.empty:
-            total_variable_expenses = current_month_expenses['Amount'].sum()
+        # Calculate total monthly recurring payments
+        if not recurring_payments.empty:
+            # Use calculate_active_monthly_payments which filters based on current date
+            recurring_payments_wo_savings = recurring_payments[recurring_payments["category"] != "Savings"]
+            total_monthly_payments = calculate_active_monthly_payments(recurring_payments_wo_savings, current_date)
+            st.metric("Total Monthly Fixed Expenses", f"${total_monthly_payments:.2f}")
 
-    # Show variable expenses in the sidebar
-    st.metric("Current Month Variable Expenses", f"${total_variable_expenses:.2f}")
+            # Show count of active payments
+            if 'start_month' in recurring_payments_wo_savings.columns and 'end_month' in recurring_payments_wo_savings.columns:
+                payments_copy = recurring_payments_wo_savings.copy()
+                payments_copy['start_month'] = pd.to_datetime(payments_copy['start_month'])
+                payments_copy['end_month'] = pd.to_datetime(payments_copy['end_month'])
 
-    # Show estimated remaining budget if both income and payments exist
-    if not income_data.empty:
-        # Calculate actual remaining budget including variable expenses
-        remaining_budget = total_monthly_income - total_monthly_payments - total_variable_expenses
-        st.metric("Remaining Budget (after all expenses)",
-                 f"${remaining_budget:.2f}",
-                 delta=None)
+                active_payments = len(payments_copy[
+                    ((pd.isna(payments_copy['start_month'])) | (payments_copy['start_month'] <= current_date)) &
+                    ((pd.isna(payments_copy['end_month'])) | (payments_copy['end_month'] >= current_date))
+                ])
+                st.caption(f"Based on {active_payments} active recurring payments")
 
-        # Show percent of income spent
-        if total_monthly_income > 0:
-            spending_percent = ((total_monthly_payments + total_variable_expenses) / total_monthly_income) * 100
-            savings_percent = 100 - spending_percent
-            st.caption(f"You've spent {spending_percent:.1f}% of your income this month")
+        # Get current month's variable expenses
+        current_month_start = pd.Timestamp(datetime.now().year, datetime.now().month, 1)
+        if datetime.now().month == 12:
+            current_month_end = pd.Timestamp(datetime.now().year + 1, 1, 1) - pd.Timedelta(days=1)
+        else:
+            current_month_end = pd.Timestamp(datetime.now().year, datetime.now().month + 1, 1) - pd.Timedelta(days=1)
 
-            # Add a simple progress bar
-            st.progress(min(spending_percent/100, 1.0), f"Saving {savings_percent:.1f}%")
+        # Initialize with zero in case there's no transaction data
+        total_variable_expenses = 0.0
+
+        # Only calculate if we have transaction data loaded
+        if 'expenses_only' in locals() and not expenses_only.empty:
+            # Filter to current month
+            current_month_expenses = expenses_only[
+                (expenses_only['Date'] >= current_month_start) &
+                (expenses_only['Date'] <= current_month_end)
+            ]
+
+            # Sum up the variable expenses for current month
+            if not current_month_expenses.empty:
+                total_variable_expenses = current_month_expenses['Amount'].sum()
+
+        # Show variable expenses in the sidebar
+        st.metric("Current Month Variable Expenses", f"${total_variable_expenses:.2f}")
+
+    c2 = st.container(border=True)
+    with c2:
+        # Show estimated remaining budget if both income and payments exist
+        if not monthly_budget.empty:
+            # Calculate actual remaining budget including variable expenses
+            remaining_budget = total_monthly_budget - total_monthly_payments - total_variable_expenses
+
+            # Colored display replacing st.metric
+            render_colored_amount("Remaining Budget (after all expenses)", remaining_budget)
+
+            # Show percent of income spent
+            if total_monthly_budget > 0:
+                spending_percent = ((total_monthly_payments + total_variable_expenses) / total_monthly_budget) * 100
+                savings_percent = 100 - spending_percent
+                st.caption(f"You've spent {spending_percent:.1f}% of your budget this month")
+
+                # Add a simple progress bar
+                st.progress(min(spending_percent/100, 1.0), f"Saving {savings_percent:.1f}%")
+            # Show estimated remaining budget if both income and payments exist
+
+        if not income_data.empty:
+            # Calculate actual remaining income including variable expenses
+            remaining_income = total_monthly_income - total_monthly_payments - total_variable_expenses
+            render_colored_amount("Remaining Income (after all expenses)", remaining_income)
+
+            # Show percent of income spent
+            if total_monthly_income > 0:
+                spending_percent = ((total_monthly_payments + total_variable_expenses) / total_monthly_income) * 100
+                savings_percent = 100 - spending_percent
+                st.caption(f"You've spent {spending_percent:.1f}% of your income this month")
+
+                # Add a simple progress bar
+                st.progress(min(spending_percent / 100, 1.0), f"Saving {savings_percent:.1f}%")
 
     # Add some spacing
     st.write("---")
@@ -1032,6 +1137,18 @@ else:
                 end_month_default = st.session_state.get('edit_end_month', datetime.now().replace(day=1))
                 end_month = st.date_input("End Month", value=end_month_default)
 
+            # Add clear form button
+            clear_income_form = st.form_submit_button("Clear Form")
+            if clear_income_form:
+                st.session_state['edit_person'] = ''
+                st.session_state['edit_income_source'] = ''
+                st.session_state['edit_amount'] = 0.0
+                st.session_state['edit_frequency'] = 'Monthly'
+                st.session_state['edit_start_month'] = datetime.now().replace(day=1)
+                st.session_state['edit_end_month'] = datetime.now().replace(day=1)
+                st.session_state['edit_income'] = False
+                st.rerun()
+
             submit_income = st.form_submit_button("Save Income Source")
 
             if submit_income and person and amount > 0:
@@ -1137,20 +1254,30 @@ else:
 
                         # Handle start_month and end_month
                         if pd.notna(selected_payment_data['start_month']):
-                            if isinstance(selected_payment_data['start_month'], str):
-                                st.session_state['edit_start_month'] = pd.to_datetime(selected_payment_data['start_month']).date()
-                            else:
-                                st.session_state['edit_start_month'] = selected_payment_data['start_month']
+                            try:
+                                # Convert to datetime first
+                                date_val = pd.to_datetime(selected_payment_data['start_month'])
+
+                                # Then convert to date
+                                st.session_state['edit_start_month'] = date_val.date()
+
+                            except Exception as e:
+                                st.error(f"Error converting date: {e}")
+                                # Use a default date if conversion fails
+                                st.session_state['edit_start_month'] = datetime.now().replace(day=1).date()
 
                         # Check if end_month exists and is not NaN/None
                         has_end_date = pd.notna(selected_payment_data['end_month']) and selected_payment_data['end_month'] not in ['None', '']
                         st.session_state.payment_end_date_enabled = has_end_date
 
                         if has_end_date:
-                            if isinstance(selected_payment_data['end_month'], str):
-                                st.session_state['edit_end_month'] = pd.to_datetime(selected_payment_data['end_month']).date()
-                            else:
-                                st.session_state['edit_end_month'] = selected_payment_data['end_month']
+                            try:
+                                # Convert end date the same way
+                                date_val = pd.to_datetime(selected_payment_data['end_month'])
+                                st.session_state['edit_end_month'] = date_val.date()
+                            except Exception as e:
+                                st.error(f"Error converting end date: {e}")
+                                st.session_state['edit_end_month'] = None
 
                         # Force a rerun to update the form with these values
                         st.rerun()
@@ -1182,14 +1309,54 @@ else:
             frequency_options = ["Monthly", "Bi-weekly", "Weekly", "Yearly", "Quarterly"]
             frequency = st.selectbox("Frequency", frequency_options,
                                     index=frequency_options.index(st.session_state.get('edit_frequency', "Monthly"))
-                                    if st.session_state.get('edit_frequency') in frequency_options else 0)
+                                    if st.session_state.get('edit_frequency') in frequency_options else 0,
+                                     key=f"frequency_{st.session_state.get('edit_payment_id', 'new')}")
 
             category = st.text_input("Category", value=st.session_state.get('edit_category', ''))
             sub_category = st.text_input("Sub-category", value=st.session_state.get('edit_sub_category', ''))
 
-            # Add date fields for start month
-            start_month_default = st.session_state.get('edit_start_month', datetime.now().replace(day=1))
-            payment_start_month = st.date_input("Start Month", value=start_month_default, key="payment_start")
+            # Add payment type dropdown
+            payment_type = st.selectbox("Payment Type", ["Fixed", "Variable"],
+                                      index=["Fixed", "Variable"].index(st.session_state.get('edit_payment_type', 'Fixed')),
+                                        key=f"payment_type_{st.session_state.get('edit_payment_id', 'new')}")
+
+            # Add clear form button
+            clear_payment_form = st.form_submit_button("Clear Form")
+            if clear_payment_form:
+                st.session_state['edit_description'] = ''
+                st.session_state['edit_amount'] = 0.0
+                st.session_state['edit_frequency'] = 'Monthly'
+                st.session_state['edit_category'] = ''
+                st.session_state['edit_sub_category'] = ''
+                st.session_state['edit_start_month'] = datetime.now().replace(day=1).date()
+                st.session_state['edit_end_month'] = datetime.now().replace(day=1).date()
+                st.session_state['edit_payment_type'] = 'Fixed'
+                st.session_state['edit_payment'] = False
+                st.rerun()
+
+            # Check if we're in edit mode
+            is_edit_mode = st.session_state.get('edit_payment', False)
+
+            # Get stored date from session state
+            session_date = st.session_state.get('edit_start_month')
+
+            if is_edit_mode and session_date is not None:
+                # Use the stored date when editing
+                start_date_value = session_date
+            else:
+                # Use current month's first day as default for new entries
+                start_date_value = datetime.now().replace(day=1).date()
+
+            # Create the date input with explicit min and max dates
+            min_date = datetime(2020, 1, 1).date()  # Reasonable minimum date
+            max_date = datetime(2030, 12, 31).date()  # Reasonable maximum date
+            payment_start_month = st.date_input(
+                "Start Month",
+                value=start_date_value,
+                min_value=min_date,
+                max_value=max_date,
+                key=f"payment_start_{st.session_state.get('edit_payment_id', 'new')}"  # Unique key for each edit
+            )
 
             # Show the end date input field based on the checkbox outside the form
             payment_end_month = None
@@ -1215,6 +1382,7 @@ else:
                     recurring_payments.loc[mask, 'sub_category'] = sub_category if sub_category else 'General'
                     recurring_payments.loc[mask, 'start_month'] = start_month_str
                     recurring_payments.loc[mask, 'end_month'] = end_month_str
+                    recurring_payments.loc[mask, 'payment_type'] = payment_type
 
                     st.success(f"Updated recurring payment: {description}")
 
@@ -1228,6 +1396,7 @@ else:
                     st.session_state.pop('edit_sub_category', None)
                     st.session_state.pop('edit_start_month', None)
                     st.session_state.pop('edit_end_month', None)
+                    st.session_state.pop('edit_payment_type', None)
                 else:
                     # Create new payment with a unique ID
                     new_id = f"payment_{len(recurring_payments) + 1}" if not recurring_payments.empty else "payment_0"
@@ -1241,6 +1410,7 @@ else:
                         'sub_category': [sub_category if sub_category else 'General'],
                         'start_month': [start_month_str],
                         'end_month': [end_month_str],
+                        'payment_type': [payment_type],
                         'id': [new_id]
                     })
 
@@ -1251,6 +1421,141 @@ else:
                 # Save updated recurring payments data
                 save_recurring_payments(recurring_payments)
                 st.rerun()  # Refresh the page to show updated data
+        # ------------------ Monthly Budget Management (new section) ------------------
+        st.subheader("Monthly Budget")
+        monthly_budget_df = load_monthly_budget()
+
+        if not monthly_budget_df.empty:
+            st.write("### Current Monthly Budget Items")
+            colb1, colb2 = st.columns([4,1])
+            with colb1:
+                st.dataframe(monthly_budget_df, use_container_width=True, hide_index=True)
+            with colb2:
+                st.write("### Actions")
+                budget_options = [f"{row['description']} (${row['amount']}) [{row['id']}]" for _, row in monthly_budget_df.iterrows()]
+                selected_budget_item = st.selectbox("Select to edit/delete", options=budget_options, key="budget_select")
+                selected_budget_id = selected_budget_item.split('[')[-1].strip(']') if selected_budget_item else None
+                if st.button("Delete Budget Item", key="budget_delete_button", type="primary") and selected_budget_id:
+                    monthly_budget_df = monthly_budget_df[monthly_budget_df['id'] != selected_budget_id]
+                    save_monthly_budget(monthly_budget_df)
+                    st.success(f"Deleted budget item: {selected_budget_item}")
+                    st.rerun()
+                if st.button("Edit Budget Item", key="budget_edit_button") and selected_budget_id:
+                    selected_budget_row = monthly_budget_df[monthly_budget_df['id'] == selected_budget_id].iloc[0]
+                    st.session_state.edit_budget = True
+                    st.session_state.edit_budget_id = selected_budget_id
+                    st.session_state.edit_budget_description = selected_budget_row['description']
+                    st.session_state.edit_budget_amount = selected_budget_row['amount']
+                    st.session_state.edit_budget_frequency = selected_budget_row['frequency']
+                    st.session_state.edit_budget_category = selected_budget_row['category']
+                    st.session_state.edit_budget_sub_category = selected_budget_row['sub_category']
+                    st.session_state.edit_budget_payment_type = selected_budget_row['payment_type']
+                    if pd.notna(selected_budget_row['start_month']):
+                        st.session_state.edit_budget_start_month = pd.to_datetime(selected_budget_row['start_month']).date()
+                    if pd.notna(selected_budget_row['end_month']) and selected_budget_row['end_month'] not in ['', 'None']:
+                        st.session_state.budget_end_date_enabled = True
+                        st.session_state.edit_budget_end_month = pd.to_datetime(selected_budget_row['end_month']).date()
+                    else:
+                        st.session_state.budget_end_date_enabled = False
+                    st.rerun()
+        else:
+            st.info("No budget items defined yet.")
+
+        # Initialize session state flags
+        if 'edit_budget' not in st.session_state:
+            st.session_state.edit_budget = False
+        if 'budget_end_date_enabled' not in st.session_state:
+            st.session_state.budget_end_date_enabled = False
+
+        budget_end_month_toggle = st.checkbox("This budget item has an end date", value=st.session_state.budget_end_date_enabled, key="budget_end_date_checkbox")
+        st.session_state.budget_end_date_enabled = budget_end_month_toggle
+
+        with st.form("monthly_budget_form"):
+            description_b = st.text_input("Description", value=st.session_state.get('edit_budget_description',''))
+            amount_b = st.number_input("Amount", min_value=0.0, format='%.2f', value=float(st.session_state.get('edit_budget_amount', 0.0)), key=f"budget_amount_{st.session_state.get('edit_budget_id', 'new')}")
+            freq_opts = ["Monthly","Bi-weekly","Weekly","Yearly","Quarterly"]
+            frequency_b = st.selectbox("Frequency", freq_opts, index=freq_opts.index(st.session_state.get('edit_budget_frequency','Monthly')) if st.session_state.get('edit_budget_frequency','Monthly') in freq_opts else 0,
+                                       key=f"budget_frequency_{st.session_state.get('edit_budget_id', 'new')}")
+            category_b = st.text_input("Category", value=st.session_state.get('edit_budget_category',''))
+            sub_category_b = st.text_input("Sub-category", value=st.session_state.get('edit_budget_sub_category',''))
+            payment_type_b = st.selectbox("Payment Type", ["Fixed","Variable"], index=["Fixed","Variable"].index(st.session_state.get('edit_budget_payment_type','Fixed')),
+                                          key=f"budget_payment_type_{st.session_state.get('edit_budget_id', 'new')}")
+            # Dates
+            start_default_b = st.session_state.get('edit_budget_start_month', datetime.now().replace(day=1).date())
+            start_month_b = st.date_input("Start Month", value=start_default_b,
+                                          key=f"budget_start_{st.session_state.get('edit_budget_id', 'new')}" )
+            end_month_b = None
+            if budget_end_month_toggle:
+                end_default_b = st.session_state.get('edit_budget_end_month', datetime.now().replace(day=1).date())
+                end_month_b = st.date_input("End Month", value=end_default_b, key=f"budget_end_{st.session_state.get('edit_budget_id', 'new')}")
+            clear_budget = st.form_submit_button("Clear Form")
+            if clear_budget:
+                for k in ['edit_budget','edit_budget_id','edit_budget_description','edit_budget_amount','edit_budget_frequency','edit_budget_category','edit_budget_sub_category','edit_budget_payment_type','edit_budget_start_month','edit_budget_end_month']:
+                    if k in st.session_state:
+                        st.session_state.pop(k)
+                keys_tuple = tuple([
+                    'budget_description', 'budget_amount', 'budget_frequency', 'budget_category',
+                    'budget_sub_category', 'budget_payment_type', 'budget_start_month', 'budget_end_month',
+                    'budget_end_date_enabled'
+                ])
+                keys_to_delete = [key for key in st.session_state.keys() if key.startswith(keys_tuple)]
+                st.write("keys_to_delete", keys_to_delete)
+                for k in keys_to_delete:
+                    st.session_state.pop(k, None)
+                st.session_state.budget_end_date_enabled = False
+                st.write("key: ", st.session_state.get('budget_amount_new', 0.0))
+                st.rerun()
+            submit_budget = st.form_submit_button("Save Budget Item")
+            if submit_budget and description_b and amount_b > 0:
+                st.write("in here")
+                start_str_b = start_month_b.strftime('%Y-%m-%d') if start_month_b else None
+                end_str_b = end_month_b.strftime('%Y-%m-%d') if budget_end_month_toggle and end_month_b else None
+                if st.session_state.get('edit_budget', False):
+                    mask = monthly_budget_df['id'] == st.session_state.edit_budget_id
+                    monthly_budget_df.loc[mask,'description'] = description_b
+                    monthly_budget_df.loc[mask,'amount'] = amount_b
+                    monthly_budget_df.loc[mask,'frequency'] = frequency_b
+                    monthly_budget_df.loc[mask,'category'] = category_b
+                    monthly_budget_df.loc[mask,'sub_category'] = sub_category_b if sub_category_b else 'General'
+                    monthly_budget_df.loc[mask,'start_month'] = start_str_b
+                    monthly_budget_df.loc[mask,'end_month'] = end_str_b
+                    monthly_budget_df.loc[mask,'payment_type'] = payment_type_b
+                    st.success(f"Updated budget item: {description_b}")
+                    # reset
+                    for k in ['edit_budget','edit_budget_id','edit_budget_description','edit_budget_amount','edit_budget_frequency','edit_budget_category','edit_budget_sub_category','edit_budget_payment_type','edit_budget_start_month','edit_budget_end_month']:
+                        if k in st.session_state:
+                            st.session_state.pop(k)
+                else:
+                    new_id_b = f"budget_{len(monthly_budget_df)+1}" if not monthly_budget_df.empty else "budget_0"
+                    new_row_b = pd.DataFrame({
+                        'description':[description_b],
+                        'amount':[amount_b],
+                        'frequency':[frequency_b],
+                        'category':[category_b],
+                        'sub_category':[sub_category_b if sub_category_b else 'General'],
+                        'start_month':[start_str_b],
+                        'end_month':[end_str_b],
+                        'payment_type':[payment_type_b],
+                        'id':[new_id_b]
+                    })
+                    monthly_budget_df = pd.concat([monthly_budget_df, new_row_b], ignore_index=True)
+                    st.success(f"Added new budget item: {description_b}")
+                    keys_tuple = tuple([
+                        'budget_description', 'budget_amount', 'budget_frequency', 'budget_category',
+                        'budget_sub_category', 'budget_payment_type', 'budget_start_month', 'budget_end_month',
+                        'budget_end_date_enabled'
+                    ])
+                    for k in [key for key in st.session_state.keys() if key.startswith(keys_tuple)]:
+                        st.session_state.pop(k, None)
+                    # Edit prefill keys (safe to remove if present)
+                    for k in [
+                        'edit_budget', 'edit_budget_id', 'edit_budget_description', 'edit_budget_amount',
+                        'edit_budget_frequency', 'edit_budget_category', 'edit_budget_sub_category',
+                        'edit_budget_payment_type', 'edit_budget_start_month', 'edit_budget_end_month'
+                    ]:
+                        st.session_state.pop(k, None)
+                save_monthly_budget(monthly_budget_df)
+                st.rerun()
 
     with tab2:
         st.header("Financial Overview")
@@ -1286,7 +1591,12 @@ else:
         active_monthly_income = calculate_active_monthly_income(income_data, selected_date_ts)
 
         # Calculate total monthly recurring payments for the selected month
-        active_monthly_payments = calculate_active_monthly_payments(recurring_payments, selected_date_ts)
+        recurring_payments_wo_savings = recurring_payments[recurring_payments["category"] != "Savings"]
+        active_monthly_payments = calculate_active_monthly_payments(recurring_payments_wo_savings, selected_date_ts)
+
+
+        # calculate
+        active_monthly_budget = calculate_active_monthly_payments(monthly_budget_df, selected_date_ts)
 
         # Get actual expenses for the selected month from the transaction data
         if not expenses_only.empty:
@@ -1298,7 +1608,8 @@ else:
             monthly_expenses = 0.0
 
         # Calculate remaining budget after actual expenses
-        remaining_budget = active_monthly_income - active_monthly_payments - monthly_expenses
+        remaining_income = active_monthly_income - active_monthly_payments - monthly_expenses
+        remaining_budget = active_monthly_budget - active_monthly_payments - monthly_expenses
 
         # Display financial metrics
         col1, col2, col3 = st.columns(3)
@@ -1325,7 +1636,11 @@ else:
             st.metric("Variable Expenses", f"${monthly_expenses:.2f}")
 
         with col3:
-            st.metric("Remaining Budget", f"${remaining_budget:.2f}")
+            # Colored remaining budget instead of st.metric
+            render_colored_amount("Remaining Budget", remaining_budget)
+
+            # Colored remaining budget instead of st.metric
+            render_colored_amount("Remaining Income", remaining_income)
             st.caption(f"For {calendar.month_name[selected_month]} {selected_year}")
 
         # Monthly income, expense, and savings breakdown
@@ -1341,6 +1656,7 @@ else:
         # Initialize data arrays for the chart
         month_labels = [d.strftime('%b %Y') for d in month_range]
         income_values = []
+        budget_values = []
         fixed_expense_values = []
         variable_expense_values = []
         savings_values = []
@@ -1360,6 +1676,10 @@ else:
             # Calculate fixed expenses for this month
             month_fixed_expenses = calculate_active_monthly_payments(recurring_payments, month_date)
             fixed_expense_values.append(month_fixed_expenses)
+
+            # Calculate fixed budget for this month
+            month_budget = calculate_active_monthly_payments(monthly_budget_df, month_date)
+            budget_values.append(month_budget)
 
             # Calculate variable expenses from transaction data
             if not expenses_only.empty:
@@ -1400,6 +1720,14 @@ else:
             y=income_values,
             name='Income',
             line=dict(color='#2ca02c', width=3)
+        ))
+
+        # Add Budget line
+        fig.add_trace(go.Scatter(
+            x=month_labels,
+            y=budget_values,
+            name='Budget',
+            line=dict(color='#000000', width=3)
         ))
 
         # Add savings line
@@ -1464,25 +1792,135 @@ else:
             ]
 
             if not month_expenses.empty:
-                # Group by category
+                # ---------------- New logic: Compute Budget vs Actual by Category ----------------
+                # Group actual (variable) expenses by Enhanced_Category
                 category_expenses = month_expenses.groupby('Enhanced_Category')['Amount'].sum().reset_index()
-                category_expenses = category_expenses.sort_values('Amount', ascending=False)
+                category_expenses.rename(columns={'Enhanced_Category': 'Category', 'Amount': 'Expenses'}, inplace=True)
 
-                fig_bar = px.bar(
-                    category_expenses,
-                    x='Enhanced_Category',
-                    y='Amount',
-                    title=f'Expenses by Category for {calendar.month_name[selected_month]} {selected_year}',
-                    color='Enhanced_Category',
-                    labels={'Enhanced_Category': 'Category', 'Amount': 'Amount ($)'}
-                )
+                # Merge in active recurring payments (frequency-normalized) excluding category 'Savings'
+                if 'recurring_payments' in locals() and not recurring_payments.empty and 'category' in recurring_payments.columns:
+                    rp_active = recurring_payments.copy()
+                    # Date parsing (coerce invalid to NaT)
+                    if 'start_month' in rp_active.columns:
+                        rp_active['start_month'] = pd.to_datetime(rp_active['start_month'], errors='coerce')
+                    if 'end_month' in rp_active.columns:
+                        rp_active['end_month'] = pd.to_datetime(rp_active['end_month'], errors='coerce')
+
+                    # Filter to payments active for selected month
+                    rp_active = rp_active[
+                        ((rp_active['start_month'].isna()) | (rp_active['start_month'] <= selected_date_ts)) &
+                        ((rp_active['end_month'].isna()) | (rp_active['end_month'] >= selected_date_ts))
+                    ]
+
+                    if not rp_active.empty:
+                        # Exclude Savings (case-insensitive, handle NaNs)
+                        rp_active['category'] = rp_active['category'].fillna('')
+                        rp_active = rp_active[rp_active['category'].str.lower() != 'savings']
+
+                        if not rp_active.empty:
+                            # Normalize amount per month using existing helper
+                            rp_active['Monthly_Amount'] = rp_active.apply(lambda r: calculate_monthly_payment(r['amount'], r['frequency']), axis=1)
+                            rp_by_cat = rp_active.groupby('category')['Monthly_Amount'].sum().reset_index()
+                            rp_by_cat.rename(columns={'category': 'Category', 'Monthly_Amount': 'Recurring'}, inplace=True)
+
+                            # Outer merge to include categories that only have recurring payments
+                            category_expenses = category_expenses.merge(rp_by_cat, on='Category', how='outer')
+                            category_expenses['Expenses'] = category_expenses['Expenses'].fillna(0.0) + category_expenses['Recurring'].fillna(0.0)
+                            category_expenses.drop(columns=['Recurring'], inplace=True)
+                # ---------------- End merge of recurring payments ----------------
+
+                # Prepare monthly budget by category for the selected month
+                category_budgets = pd.DataFrame(columns=['Category', 'Budget'])
+                if 'category' in monthly_budget_df.columns and not monthly_budget_df.empty:
+                    budget_active = monthly_budget_df.copy()
+                    # Convert dates to datetime for comparison
+                    if 'start_month' in budget_active.columns:
+                        budget_active['start_month'] = pd.to_datetime(budget_active['start_month'], errors='coerce')
+                    if 'end_month' in budget_active.columns:
+                        budget_active['end_month'] = pd.to_datetime(budget_active['end_month'], errors='coerce')
+
+                    # Filter active budget items for the selected month
+                    budget_active = budget_active[
+                        ((budget_active['start_month'].isna()) | (budget_active['start_month'] <= selected_date_ts)) &
+                        ((budget_active['end_month'].isna()) | (budget_active['end_month'] >= selected_date_ts))
+                    ]
+
+                    if not budget_active.empty:
+                        # Calculate the effective monthly amount for each budget line using existing helper
+                        budget_active['Monthly_Amount'] = budget_active.apply(
+                            lambda row: calculate_monthly_payment(row['amount'], row['frequency']), axis=1
+                        )
+                        category_budgets = budget_active.groupby('category')['Monthly_Amount'].sum().reset_index()
+                        category_budgets.rename(columns={'category': 'Category', 'Monthly_Amount': 'Budget'}, inplace=True)
+
+                # Merge budgets and expenses (union of categories)
+                combined = pd.merge(category_budgets, category_expenses, on='Category', how='outer')
+                combined['Budget'] = combined['Budget'].fillna(0.0)
+                combined['Expenses'] = combined['Expenses'].fillna(0.0)
+                combined['Variance'] = combined['Budget'] - combined['Expenses']  # Positive = Under budget
+
+                # Sort categories by highest Expenses (fallback to Budget if equal)
+                combined.sort_values(['Expenses', 'Budget'], ascending=[False, False], inplace=True)
+
+                # Build grouped bar chart Budget vs Expenses
+                fig_bar = go.Figure()
+                fig_bar.add_trace(go.Bar(
+                    x=combined['Category'],
+                    y=combined['Budget'],
+                    name='Budget',
+                    marker_color='#1f77b4',
+                    hovertemplate='<b>%{x}</b><br>Budget: $%{y:.2f}<extra></extra>'
+                ))
+                fig_bar.add_trace(go.Bar(
+                    x=combined['Category'],
+                    y=combined['Expenses'],
+                    name='Expenses',
+                    marker_color='#d62728',
+                    hovertemplate='<b>%{x}</b><br>Expenses: $%{y:.2f}<extra></extra>'
+                ))
+
+                # Add variance annotations (optional small text above bars)
+                annotations = []
+                for idx, row in combined.iterrows():
+                    variance_text = f"Δ ${(row['Variance']):.0f}" if row['Variance'] != 0 else ""
+                    if variance_text:
+                        annotations.append(dict(
+                            x=row['Category'],
+                            y=max(row['Budget'], row['Expenses']) * 1.02,
+                            text=variance_text,
+                            showarrow=False,
+                            font=dict(size=10, color='#333')
+                        ))
 
                 fig_bar.update_layout(
+                    title=f'Budget vs Actual Expenses by Category - {calendar.month_name[selected_month]} {selected_year}',
+                    xaxis_title='Category',
+                    yaxis_title='Amount ($)',
+                    barmode='group',
                     xaxis_tickangle=-45,
-                    plot_bgcolor='rgba(0,0,0,0)'
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='center', x=0.5),
+                    annotations=annotations,
+                    margin=dict(t=80)
+                )
+
+                # Add variance hover info via customdata
+                fig_bar.update_traces(
+                    selector=dict(name='Expenses'),
+                    hovertemplate='<b>%{x}</b><br>Expenses: $%{y:.2f}<br>' +
+                                  'Budget: $%{customdata[0]:.2f}<br>Variance: $%{customdata[1]:.2f}<extra></extra>',
+                    customdata=np.stack((combined['Budget'], combined['Variance']), axis=-1)
+                )
+                fig_bar.update_traces(
+                    selector=dict(name='Budget'),
+                    hovertemplate='<b>%{x}</b><br>Budget: $%{y:.2f}<br>' +
+                                  'Expenses: $%{customdata[0]:.2f}<br>Variance: $%{customdata[1]:.2f}<extra></extra>',
+                    customdata=np.stack((combined['Expenses'], combined['Variance']), axis=-1)
                 )
 
                 st.plotly_chart(fig_bar, use_container_width=True)
+                st.caption('Variance = Budget - Expenses (positive means under budget)')
+                # ------------------------------------------------------------------------------
             else:
                 st.info(f"No expense data available for {calendar.month_name[selected_month]} {selected_year}")
         else:
@@ -2281,7 +2719,7 @@ else:
             with cat_tab2:
                 st.subheader("Manual Category Assignments")
                 st.markdown("""
-                These are exact matches for specific transaction descriptions. 
+                These are exact matches for specific transaction descriptions.
                 They override any pattern-based rules.
                 """)
 
@@ -2439,23 +2877,22 @@ else:
             This will make your transaction data available for analysis in the application.
             """)
 
-            # Get list of existing folders in user_transactions_data directory
-            # Use S3 storage instead of local filesystem
+            # Get list of existing folders in user_transactions_data directory via S3
             username = st.session_state.username
             data_dir = 'user_transactions_data'
 
-            # Get folders from S3 instead of local directory
             try:
-                # List all files in the user's transaction data directory
-                all_s3_files = list_files_in_user_folder(data_dir, username)
+                # List all files (keys) in the user's transaction data directory
+                _, all_s3_files = list_files_in_user_folder(data_dir, username)
 
                 # Extract unique folder names from file paths
                 folders = set()
                 for file_path in all_s3_files:
-                    if '/' in file_path:
-                        folder_name = file_path.split('/')[0]
-                        folders.add(folder_name)
-                folders = list(folders)
+                    # Expect relative paths like 'discover/file.csv'
+                    parts = file_path.split('/')
+                    if len(parts) > 1:  # has a subfolder
+                        folders.add(parts[0])
+                folders = sorted(list(folders))
             except Exception as e:
                 st.error(f"Error retrieving folders: {str(e)}")
                 folders = []
@@ -2464,19 +2901,16 @@ else:
             create_new_folder = st.checkbox("Create a new bank folder")
 
             if create_new_folder:
-                # New folder creation
                 new_folder_name = st.text_input("Enter new bank/folder name:")
                 if new_folder_name:
-                    if new_folder_name not in folders and new_folder_name != '':
+                    if new_folder_name not in folders and new_folder_name.strip() != '':
                         if st.button("Create Folder"):
                             try:
-                                # Create a placeholder file in S3 to represent the new folder
+                                # Create placeholder file to realize the folder in S3
                                 from s3_utils import write_file_to_s3
                                 write_file_to_s3(username, f"{new_folder_name}/.placeholder", "")
                                 st.success(f"Successfully created folder: {new_folder_name}")
-                                # Add the new folder to the list
                                 folders.append(new_folder_name)
-                                # Force a rerun to update the folder list
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Error creating folder: {str(e)}")
@@ -2498,70 +2932,81 @@ else:
             uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
             if uploaded_file is not None:
-                # Display file details
-                file_details = {
-                    "Filename": uploaded_file.name,
-                    "File size": f"{uploaded_file.size / 1024:.2f} KB"
-                }
-                st.write(file_details)
+                if not selected_folder:
+                    st.warning("Please select or create a folder before uploading a file.")
+                else:
+                    file_details = {
+                        "Filename": uploaded_file.name,
+                        "File size": f"{uploaded_file.size / 1024:.2f} KB"
+                    }
+                    st.write(file_details)
 
-                # Preview the CSV
-                try:
-                    df = pd.read_csv(uploaded_file)
-                    st.write("Preview of the uploaded file:")
-                    st.dataframe(df.head(5))
+                    # Preview
+                    try:
 
-                    # Check if file with same name exists
-                    target_path = os.path.join(data_dir, selected_folder, uploaded_file.name)
-                    file_exists = os.path.exists(target_path)
+                        df_preview = pd.read_csv(uploaded_file)
+                        if selected_folder.lower() == "bilt":
+                            df_preview = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                     names=["Transaction Date",
+                                                                                          "Debit/Credit",
+                                                                                          "Reference Number",
+                                                                                          "Card No.",
+                                                                                          "Description"])
+
+                        st.write("Preview of the uploaded file:")
+                        st.dataframe(df_preview.head(5), use_container_width=True)
+                    except Exception as e:
+                        st.error(f"Error reading the CSV file: {str(e)}")
+                        st.stop()
+
+                    # Check if file exists in S3
+                    from s3_utils import s3_file_exists
+                    s3_key = f"{username}/{data_dir}/{selected_folder}/{uploaded_file.name}"
+                    file_exists = s3_file_exists(s3_key)
 
                     if file_exists:
                         overwrite = st.checkbox("A file with this name already exists. Overwrite?")
                         if not overwrite:
                             st.stop()
 
-                    # Save button
                     if st.button("Save File"):
                         try:
-                            # Save the uploaded file
-                            with open(target_path, "wb") as f:
-                                f.write(uploaded_file.getbuffer())
-                            st.success(f"Successfully saved {uploaded_file.name} to {selected_folder} folder!")
-
-                            # Show current files in the selected folder
-                            st.subheader(f"Current files in {selected_folder}:")
-                            folder_files = [f for f in os.listdir(os.path.join(data_dir, selected_folder))
-                                           if os.path.isfile(os.path.join(data_dir, selected_folder, f))]
-                            st.write(folder_files)
-
+                            from s3_utils import write_file_to_s3
+                            # write_file_to_s3 expects (username, relative_path, content_string)
+                            # Relative path inside user_transactions_data/<folder>/<file>
+                            content_str = uploaded_file.getvalue().decode('utf-8')
+                            # If Bilt folder, enforce headers when saving
+                            if selected_folder and selected_folder.lower() == "bilt":
+                                try:
+                                    # df_preview already has correct headers assigned above
+                                    content_str = df_preview.to_csv(index=False)
+                                except Exception:
+                                    # Fallback: re-read and assign headers explicitly
+                                    bilt_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                          names=["Transaction Date",
+                                                                 "Debit/Credit",
+                                                                 "Reference Number",
+                                                                 "Card No.",
+                                                                 "Description"])
+                                    content_str = bilt_df.to_csv(index=False)
+                            write_file_to_s3(username, f"{selected_folder}/{uploaded_file.name}", content_str)
+                            st.success(f"Successfully saved {uploaded_file.name} to {selected_folder} folder in S3!")
+                            st.rerun()
                         except Exception as e:
-                            st.error(f"Error saving file: {str(e)}")
-                except Exception as e:
-                    st.error(f"Error reading the CSV file: {str(e)}")
+                            st.error(f"Error saving file to S3: {str(e)}")
 
-            # Display existing files in folders
+            # Display existing files in folders from S3
             st.subheader("Existing Transaction Files")
-
-            # Create an expandable section for each folder
-            for folder in folders:
-                with st.expander(f"{folder.capitalize()} Files"):
-                    folder_path = os.path.join(data_dir, folder)
-                    files = [f for f in os.listdir(folder_path)
-                            if os.path.isfile(os.path.join(folder_path, f))]
-
-                    if files:
-                        # Create a table for files with their details
-                        file_data = []
-                        for filename in files:
-                            file_path = os.path.join(folder_path, filename)
-                            size_kb = os.path.getsize(file_path) / 1024
-                            mod_time = os.path.getmtime(file_path)
-                            mod_date = datetime.fromtimestamp(mod_time).strftime('%Y-%m-%d %H:%M:%S')
-                            file_data.append({"Filename": filename, "Size (KB)": f"{size_kb:.2f}", "Last Modified": mod_date})
-
-                        # Create a dataframe and display
-                        if file_data:
-                            files_df = pd.DataFrame(file_data)
-                            st.dataframe(files_df, use_container_width=True, hide_index=True)
-                    else:
-                        st.info(f"No files in {folder} folder.")
+            if not folders:
+                st.info("No folders available.")
+            else:
+                for folder in folders:
+                    with st.expander(f"{folder.capitalize()} Files"):
+                        # List files in this specific folder
+                        files, rel_paths = list_files_in_user_folder(f"user_transactions_data/{folder}", username)
+                        # Filter out placeholder
+                        display_files = [f for f in files if f != '.placeholder']
+                        if display_files:
+                            st.write(display_files)
+                        else:
+                            st.info(f"No files in {folder} folder.")
