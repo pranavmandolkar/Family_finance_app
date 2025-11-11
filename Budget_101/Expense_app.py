@@ -1,3 +1,6 @@
+from collections import defaultdict
+from itertools import combinations
+
 import streamlit as st
 
 # Import login functionality
@@ -275,48 +278,84 @@ def load_saver_one_data(username, file_name):
     return df
 
 def load_all_transaction_data():
-    """Load all transaction data from different banks."""
+    """Load all transaction data from different banks, and find repeated dates by Bank."""
+    # Dictionary to hold all dataframes per bank
+    bank_data = defaultdict(list)
     all_data = []
 
     # Process Discover data
     discover_files, _ = list_files_in_user_folder("user_transactions_data/discover", st.session_state.username)
     for file in discover_files:
         df = load_discover_data(st.session_state.username, file)
+        bank_data['Discover'].append(df)
         all_data.append(df)
 
     # Process Capital One data
     capital_one_files, _ = list_files_in_user_folder("user_transactions_data/Venture_X", st.session_state.username)
     for file in capital_one_files:
         df = load_capital_one_data(st.session_state.username, file)
+        bank_data['Capital One'].append(df)
         all_data.append(df)
 
     # Process Saver One data
     saver_one_files, _ = list_files_in_user_folder("user_transactions_data/Saver_one", st.session_state.username)
     for file in saver_one_files:
         df = load_saver_one_data(st.session_state.username, file)
+        bank_data['Saver One'].append(df)
         all_data.append(df)
 
     # Process Bilt data
     bilt_files, _ = list_files_in_user_folder("user_transactions_data/bilt", st.session_state.username)
     for file in bilt_files:
         df = load_bilt_data(st.session_state.username, file)
+        bank_data['Bilt'].append(df)
         all_data.append(df)
+
+    # Find repeating dates for each bank
+    repeated_dates_by_bank = {}
+
+    for bank, dfs in bank_data.items():
+        # Gather unique dates from each file
+        file_dates = [set(df['Date'].unique()) for df in dfs]
+
+        # Find dates that appear in more than one file
+        repeated_dates = set()
+        # Compare all combinations of files within this bank
+        for combo in combinations(range(len(file_dates)), 2):
+            i, j = combo
+            # Find intersection
+            common = file_dates[i].intersection(file_dates[j])
+            repeated_dates.update(common)
+        # Store as list
+        repeated_dates_by_bank[bank] = list(repeated_dates)
+
 
     # Combine all data
     if all_data:
         combined_data = pd.concat(all_data, ignore_index=True)
-        # Keep only essential columns for analysis
         columns_to_keep = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
         combined_data = combined_data[columns_to_keep]
-
-        # Post-processing to identify refunds and credits across different rows
         combined_data = identify_related_refunds(combined_data)
-
-        # Sort by date
         combined_data = combined_data.sort_values('Date')
-        unique_combined_data = combined_data.drop_duplicates()
-        return unique_combined_data
+
+        # Step 1: Identify duplicate rows only for repeating dates
+        mask = combined_data.apply(
+            lambda row: row['Date'] in repeated_dates_by_bank.get(row['Bank'], []), axis=1
+        )
+
+        # Step 2: Separate those rows and remove duplicates
+        repeated_date_rows = combined_data[mask]
+        unique_repeated_date_rows = repeated_date_rows.drop_duplicates()
+
+        # Step 3: Get non-repeated date rows
+        non_repeated_date_rows = combined_data[~mask]
+
+        # Step 4: Concatenate final unique dataframe
+        final_unique_data = pd.concat([unique_repeated_date_rows, non_repeated_date_rows], ignore_index=True)
+
+        return final_unique_data
     return pd.DataFrame()
+
 
 def identify_related_refunds(df):
     """
