@@ -856,6 +856,53 @@ def load_monthly_budget():
         print(f"Error loading monthly budget from S3: {e}")
     return pd.DataFrame(columns=['description','amount','frequency','category','sub_category','start_month','end_month','payment_type','id'])
 
+def load_one_time_adjustments():
+    username = st.session_state.username
+    one_time_adj_file_path = 'one_time_adjustmenta.csv'
+    try:
+        file_content = read_file_from_s3(username, one_time_adj_file_path)
+        if file_content is not None:
+            from io import StringIO
+            df = pd.read_csv(StringIO(file_content))
+            # Ensure required columns exist
+            required_cols = ['description','amount','frequency','category','sub_category','start_month','end_month','id']
+            for col in required_cols:
+                if col not in df.columns:
+                    if col == 'payment_type':
+                        df[col] = 'Fixed'
+                    elif col == 'id':
+                        df[col] = [f"budget_{i}" for i in range(len(df))]
+                    else:
+                        df[col] = None
+            # Parse dates
+            if 'start_month' in df.columns:
+                df['start_month'] = pd.to_datetime(df['start_month'], errors='coerce').dt.date
+            if 'end_month' in df.columns:
+                df['end_month'] = pd.to_datetime(df['end_month'], errors='coerce').dt.date
+            # Guarantee ids
+            if 'id' in df.columns and df['id'].isna().any():
+                df.loc[df['id'].isna(),'id'] = [f"one_time_adj_{i}" for i in range(len(df[df['id'].isna()]))]
+            return df[required_cols]
+    except Exception as e:
+        print(f"Error loading one time adjustment from S3: {e}")
+    return pd.DataFrame(columns=['description','amount','frequency','category','sub_category','start_month','end_month','payment_type','id'])
+
+# Function to save monthly budget data
+def save_one_time_adj(df):
+    username = st.session_state.username
+    budget_file_path = 'one_time_adjustmenta.csv'
+    save_df = df.copy()
+    # Normalize date columns
+    for col in ['start_month','end_month']:
+        if col in save_df.columns:
+            save_df[col] = save_df[col].apply(lambda x: pd.to_datetime(x).strftime('%Y-%m-%d') if pd.notna(x) else '')
+    try:
+        from s3_utils import write_file_to_s3
+        csv_content = save_df.to_csv(index=False)
+        write_file_to_s3(username, budget_file_path, csv_content)
+    except Exception as e:
+        print(f"Error saving one time adjustment to S3: {e}")
+
 # Function to save monthly budget data
 def save_monthly_budget(df):
     username = st.session_state.username
@@ -910,6 +957,7 @@ with st.sidebar:
     income_data = load_income_data()
     recurring_payments = load_recurring_payments()
     monthly_budget = load_monthly_budget()
+    one_time_adjustment = load_one_time_adjustments()
 
     c1 = st.container(border=True)
     with c1:
@@ -955,6 +1003,24 @@ with st.sidebar:
                                           ])
                 st.caption(f"Based on {active_budget_items} active recurring budget items")
 
+        if not one_time_adjustment.empty:
+            # Use calculate_active_monthly_payments which filters based on current date
+            total_one_time_adj = calculate_active_monthly_payments(one_time_adjustment, current_date)
+            st.metric("Total one time adjustment ", f"${total_one_time_adj:.2f}")
+
+            # Show count of active payments
+            if 'start_month' in one_time_adjustment.columns and 'end_month' in one_time_adjustment.columns:
+                one_time_adj_copy = one_time_adjustment.copy()
+                one_time_adj_copy['start_month'] = pd.to_datetime(one_time_adj_copy['start_month'])
+                one_time_adj_copy['end_month'] = pd.to_datetime(one_time_adj_copy['end_month'])
+
+                active_one_time_adj_items = len(one_time_adj_copy[
+                                          ((pd.isna(one_time_adj_copy['start_month'])) | (
+                                                      one_time_adj_copy['start_month'] <= current_date)) &
+                                          ((pd.isna(one_time_adj_copy['end_month'])) | (
+                                                      one_time_adj_copy['end_month'] >= current_date))
+                                          ])
+                st.caption(f"Based on {active_one_time_adj_items} active recurring budget items")
         # Calculate total monthly recurring payments
         if not recurring_payments.empty:
             # Use calculate_active_monthly_payments which filters based on current date
@@ -1004,7 +1070,7 @@ with st.sidebar:
         # Show estimated remaining budget if both income and payments exist
         if not monthly_budget.empty:
             # Calculate actual remaining budget including variable expenses
-            remaining_budget = total_monthly_budget - total_monthly_payments - total_variable_expenses
+            remaining_budget = total_monthly_budget - total_monthly_payments - total_variable_expenses + total_one_time_adj
 
             # Colored display replacing st.metric
             render_colored_amount("Remaining Budget (after all expenses)", remaining_budget)
@@ -1021,7 +1087,7 @@ with st.sidebar:
 
         if not income_data.empty:
             # Calculate actual remaining income including variable expenses
-            remaining_income = total_monthly_income - total_monthly_payments - total_variable_expenses
+            remaining_income = total_monthly_income - total_monthly_payments - total_variable_expenses + total_one_time_adj
             render_colored_amount("Remaining Income (after all expenses)", remaining_income)
 
             # Show percent of income spent
@@ -1596,6 +1662,159 @@ else:
                 save_monthly_budget(monthly_budget_df)
                 st.rerun()
 
+        # ------------------ One time Adjustments Management (new section) ------------------
+        st.subheader("One time Adjustments")
+        one_time_adj_df = load_one_time_adjustments()
+
+        if not one_time_adj_df.empty:
+            st.write("### One time adjustments Items")
+            colb1, colb2 = st.columns([4, 1])
+            with colb1:
+                st.dataframe(one_time_adj_df, use_container_width=True, hide_index=True)
+            with colb2:
+                st.write("### Actions")
+                one_time_adj_options = [f"{row['description']} (${row['amount']}) [{row['id']}]" for _, row in
+                                  one_time_adj_df.iterrows()]
+                selected_one_time_adj_item = st.selectbox("Select to edit/delete", options=one_time_adj_options,
+                                                    key="one_time_adj_select")
+                selected_one_time_adj_id = selected_one_time_adj_item.split('[')[-1].strip(
+                    ']') if selected_one_time_adj_item else None
+                if st.button("Delete One Time adjustment Item", key="one_time_adj_delete_button",
+                             type="primary") and selected_one_time_adj_id:
+                    on_time_adj_df = one_time_adj_df[one_time_adj_df['id'] != selected_one_time_adj_id]
+                    save_one_time_adj(on_time_adj_df)
+                    st.success(f"Deleted one time adjustment item: {selected_one_time_adj_item}")
+                    st.rerun()
+                if st.button("Edit one time adjustment Item", key="one_time_adj_edit_button") and selected_one_time_adj_id:
+                    selected_one_time_adj_row = on_time_adj_df[on_time_adj_df['id'] == selected_one_time_adj_id].iloc[
+                        0]
+                    st.session_state.edit_one_time_adj = True
+                    st.session_state.edit_one_time_adj_id = selected_one_time_adj_id
+                    st.session_state.edit_one_time_adj_description = selected_one_time_adj_row['description']
+                    st.session_state.edit_one_time_adj_amount = selected_one_time_adj_row['amount']
+                    st.session_state.edit_one_time_adj_frequency = selected_one_time_adj_row['frequency']
+                    st.session_state.edit_one_time_adj_category = selected_one_time_adj_row['category']
+                    st.session_state.edit_one_time_adj_sub_category = selected_one_time_adj_row['sub_category']
+                    if pd.notna(selected_one_time_adj_row['start_month']):
+                        st.session_state.edit_one_time_adj_start_month = pd.to_datetime(
+                            selected_one_time_adj_row['start_month']).date()
+                    if pd.notna(selected_one_time_adj_row['end_month']) and selected_one_time_adj_row['end_month'] not in [
+                        '', 'None']:
+                        st.session_state.one_time_adj_end_date_enabled = True
+                        st.session_state.edit_one_time_adj_end_month = pd.to_datetime(
+                            selected_one_time_adj_row['end_month']).date()
+                    else:
+                        st.session_state.one_time_adj_end_date_enabled = False
+                    st.rerun()
+        else:
+            st.info("No one time adjustment items defined yet.")
+
+        # Initialize session state flags
+        if 'edit_one_time_adj' not in st.session_state:
+            st.session_state.edit_one_time_adj = False
+        if 'one_time_adj_end_date_enabled' not in st.session_state:
+            st.session_state.one_time_adj_end_date_enabled = False
+
+        one_time_adj_end_month_toggle = st.checkbox("This one time adjustment item has an end date",
+                                              value=st.session_state.one_time_adj_end_date_enabled,
+                                              key="one_time_adj_end_date_checkbox")
+        st.session_state.one_time_adj_end_date_enabled = one_time_adj_end_month_toggle
+
+        with st.form("monthly_one_time_adj_form"):
+            description_ot = st.text_input("Description",
+                                          value=st.session_state.get('edit_one_time_adj_description', ''))
+            amount_ot = st.number_input("Amount", min_value=0.0, format='%.2f',
+                                       value=float(st.session_state.get('edit_one_time_adj_amount', 0.0)),
+                                       key=f"one_time_adj_amount_{st.session_state.get('edit_one_time_adj_id', 'new')}")
+            freq_opts = ["One-Time", "Monthly", "Bi-weekly", "Weekly", "Yearly", "Quarterly"]
+            frequency_ot = st.selectbox("Frequency", freq_opts, index=freq_opts.index(
+                st.session_state.get('edit_one_time_adj_frequency', 'Monthly')) if st.session_state.get(
+                'edit_one_time_adj_frequency', 'One-Time') in freq_opts else 0,
+                                       key=f"one_time_adj_frequency_{st.session_state.get('edit_one_time_adj_id', 'new')}")
+            category_ot = st.text_input("Category", value=st.session_state.get('edit_one_time_adj_category', ''))
+            sub_category_ot = st.text_input("Sub-category",
+                                           value=st.session_state.get('edit_one_time_adj_sub_category', ''))
+            # Dates
+            start_default_ot = st.session_state.get('edit_one_time_adj_start_month',
+                                                   datetime.now().replace(day=1).date())
+            start_month_ot = st.date_input("Start Month", value=start_default_ot,
+                                          key=f"one_time_adj_start_{st.session_state.get('edit_one_time_adj_id', 'new')}")
+            end_month_ot = None
+            if one_time_adj_end_month_toggle:
+                end_default_ot = st.session_state.get('edit_one_time_adj_end_month',
+                                                     datetime.now().replace(day=1).date())
+                end_month_ot = st.date_input("End Month", value=end_default_ot,
+                                            key=f"one_time_adj_end_{st.session_state.get('edit_one_time_adj_id', 'new')}")
+            clear_one_time_adj = st.form_submit_button("Clear Form")
+            if clear_one_time_adj:
+                for k in ['edit_one_time_adj', 'edit_one_time_adj_id', 'edit_one_time_adj_description', 'edit_one_time_adj_amount',
+                          'edit_one_time_adj_frequency', 'edit_one_time_adj_category', 'edit_one_time_adj_sub_category',
+                          'edit_one_time_adj_payment_type', 'edit_one_time_adj_start_month', 'edit_one_time_adj_end_month']:
+                    if k in st.session_state:
+                        st.session_state.pop(k)
+                keys_tuple_ot = tuple([
+                    'one_time_adj_description', 'one_time_adj_amount', 'one_time_adj_frequency', 'one_time_adj_category',
+                    'one_time_adj_sub_category', 'one_time_adj_start_month', 'one_time_adj_end_month',
+                    'one_time_adj_end_date_enabled'
+                ])
+                keys_to_delete_ot = [key for key in st.session_state.keys() if key.startswith(keys_tuple_ot)]
+                for k in keys_to_delete_ot:
+                    st.session_state.pop(k, None)
+                st.session_state.one_time_adj_end_date_enabled = False
+                st.rerun()
+            submit_one_time_adj = st.form_submit_button("Save One Time Adjustment Item")
+            if submit_one_time_adj and description_ot and amount_ot > 0:
+                start_str_ot = start_month_ot.strftime('%Y-%m-%d') if start_month_ot else None
+                end_str_ot = end_month_ot.strftime(
+                    '%Y-%m-%d') if one_time_adj_end_month_toggle and end_month_ot else None
+                if st.session_state.get('edit_one_time_adj', False):
+                    mask = one_time_adj_df['id'] == st.session_state.edit_one_time_adj_id
+                    one_time_adj_df.loc[mask, 'description'] = description_ot
+                    one_time_adj_df.loc[mask, 'amount'] = amount_ot
+                    one_time_adj_df.loc[mask, 'frequency'] = frequency_ot
+                    one_time_adj_df.loc[mask, 'category'] = category_ot
+                    one_time_adj_df.loc[
+                        mask, 'sub_category'] = sub_category_ot if sub_category_ot else 'General'
+                    one_time_adj_df.loc[mask, 'start_month'] = start_str_ot
+                    one_time_adj_df.loc[mask, 'end_month'] = end_str_ot
+                    st.success(f"Updated One Time Adjustment item: {description_ot}")
+                    # reset
+                    for k in ['edit_one_time_adj', 'edit_one_time_adj_id', 'edit_one_time_adj_description', 'edit_one_time_adj_amount',
+                              'edit_one_time_adj_frequency', 'edit_one_time_adj_category', 'edit_one_time_adj_sub_category',
+                              'edit_one_time_adj_payment_type', 'edit_one_time_adj_start_month', 'edit_one_time_adj_end_month']:
+                        if k in st.session_state:
+                            st.session_state.pop(k)
+                else:
+                    new_id_ot = f"one_time_adj_{len(one_time_adj_df) + 1}" if not one_time_adj_df.empty else "one_time_adj_0"
+                    new_row_ot = pd.DataFrame({
+                        'description': [description_ot],
+                        'amount': [amount_ot],
+                        'frequency': [frequency_ot],
+                        'category': [category_ot],
+                        'sub_category': [sub_category_ot if sub_category_ot else 'General'],
+                        'start_month': [start_str_ot],
+                        'end_month': [end_str_ot],
+                        'id': [new_id_ot]
+                    })
+                    one_time_adj_df = pd.concat([one_time_adj_df, new_row_ot], ignore_index=True)
+                    st.success(f"Added new one time adjustment item: {description_ot}")
+                    keys_tuple_ot = tuple([
+                        'one_time_adj_description', 'one_time_adj_amount', 'one_time_adj_frequency', 'one_time_adj_category',
+                        'one_time_adj_sub_category', 'one_time_adj_payment_type', 'one_time_adj_start_month', 'one_time_adj_end_month',
+                        'one_time_adj_end_date_enabled'
+                    ])
+                    for k in [key for key in st.session_state.keys() if key.startswith(keys_tuple_ot)]:
+                        st.session_state.pop(k, None)
+                    # Edit prefill keys (safe to remove if present)
+                    for k in [
+                        'edit_one_time_adj', 'edit_one_time_adj_id', 'edit_one_time_adj_description', 'edit_one_time_adj_amount',
+                        'edit_one_time_adj_frequency', 'edit_one_time_adj_category', 'edit_one_time_adj_sub_category',
+                        'edit_one_time_adj_payment_type', 'edit_one_time_adj_start_month', 'edit_one_time_adj_end_month'
+                    ]:
+                        st.session_state.pop(k, None)
+                save_one_time_adj(one_time_adj_df)
+                st.rerun()
+
     with tab2:
         st.header("Financial Overview")
 
@@ -1633,6 +1852,7 @@ else:
         recurring_payments_wo_savings = recurring_payments[recurring_payments["category"] != "Savings"]
         active_monthly_payments = calculate_active_monthly_payments(recurring_payments_wo_savings, selected_date_ts)
 
+        active_total_one_time_adj = calculate_active_monthly_payments(one_time_adjustment, selected_date_ts)
 
         # calculate
         active_monthly_budget = calculate_active_monthly_payments(monthly_budget_df, selected_date_ts)
@@ -1647,8 +1867,8 @@ else:
             monthly_expenses = 0.0
 
         # Calculate remaining budget after actual expenses
-        remaining_income = active_monthly_income - active_monthly_payments - monthly_expenses
-        remaining_budget = active_monthly_budget - active_monthly_payments - monthly_expenses
+        remaining_income = active_monthly_income - active_monthly_payments - monthly_expenses + active_total_one_time_adj
+        remaining_budget = active_monthly_budget - active_monthly_payments - monthly_expenses + active_total_one_time_adj
 
         # Display financial metrics
         col1, col2, col3 = st.columns(3)
@@ -1674,6 +1894,9 @@ else:
             # Show variable expenses pulled from Monthly Expense Summary
             st.metric("Variable Expenses", f"${monthly_expenses:.2f}")
 
+            if not one_time_adjustment.empty:
+                st.metric("One time adjustments", f"${active_total_one_time_adj:.2f}")
+
         with col3:
             # Colored remaining budget instead of st.metric
             render_colored_amount("Remaining Budget", remaining_budget)
@@ -1698,6 +1921,7 @@ else:
         budget_values = []
         fixed_expense_values = []
         variable_expense_values = []
+        one_time_adjustment_values = []
         savings_values = []
 
         # Calculate values for each month in the range
@@ -1713,8 +1937,12 @@ else:
             income_values.append(month_income)
 
             # Calculate fixed expenses for this month
-            month_fixed_expenses = calculate_active_monthly_payments(recurring_payments, month_date)
+            recurring_payments_wo_savings = recurring_payments[recurring_payments["category"] != "Savings"]
+            month_fixed_expenses = calculate_active_monthly_payments(recurring_payments_wo_savings, month_date)
             fixed_expense_values.append(month_fixed_expenses)
+
+            month_total_one_time_adj = calculate_active_monthly_payments(one_time_adjustment, month_date)
+            one_time_adjustment_values.append(month_total_one_time_adj)
 
             # Calculate fixed budget for this month
             month_budget = calculate_active_monthly_payments(monthly_budget_df, month_date)
@@ -1731,7 +1959,7 @@ else:
             variable_expense_values.append(month_variable_expenses)
 
             # Calculate savings
-            month_savings = month_income - month_fixed_expenses - month_variable_expenses
+            month_savings = month_income - month_fixed_expenses - month_variable_expenses + month_total_one_time_adj
             savings_values.append(month_savings)
 
         # Create data for the stacked bar chart
@@ -1766,7 +1994,7 @@ else:
             x=month_labels,
             y=budget_values,
             name='Budget',
-            line=dict(color='#000000', width=3)
+            line=dict(color='#4C00B0', width=3)
         ))
 
         # Add savings line
@@ -1928,7 +2156,7 @@ else:
                             y=max(row['Budget'], row['Expenses']) * 1.02,
                             text=variance_text,
                             showarrow=False,
-                            font=dict(size=10, color='#333')
+                            font=dict(size=20, color='#ff7f0e')
                         ))
 
                 fig_bar.update_layout(
