@@ -278,84 +278,32 @@ def load_saver_one_data(username, file_name):
     return df
 
 def load_all_transaction_data():
-    """Load all transaction data from different banks, and find repeated dates by Bank."""
-    # Dictionary to hold all dataframes per bank
-    bank_data = defaultdict(list)
-    all_data = []
+    """Load all transaction data from the aggregated S3 CSV for the user."""
+    try:
+        # Attempt to read the combined processed transactions file from S3
+        combined_df = load_csv_from_s3(st.session_state.username, "user_transactions_data", "all_processed_transactions.csv")
+        if combined_df is None or combined_df.empty:
+            return pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
 
-    # Process Discover data
-    discover_files, _ = list_files_in_user_folder("user_transactions_data/discover", st.session_state.username)
-    for file in discover_files:
-        df = load_discover_data(st.session_state.username, file)
-        bank_data['Discover'].append(df)
-        all_data.append(df)
-
-    # Process Capital One data
-    capital_one_files, _ = list_files_in_user_folder("user_transactions_data/Venture_X", st.session_state.username)
-    for file in capital_one_files:
-        df = load_capital_one_data(st.session_state.username, file)
-        bank_data['Capital One'].append(df)
-        all_data.append(df)
-
-    # Process Saver One data
-    saver_one_files, _ = list_files_in_user_folder("user_transactions_data/Saver_one", st.session_state.username)
-    for file in saver_one_files:
-        df = load_saver_one_data(st.session_state.username, file)
-        bank_data['Saver One'].append(df)
-        all_data.append(df)
-
-    # Process Bilt data
-    bilt_files, _ = list_files_in_user_folder("user_transactions_data/bilt", st.session_state.username)
-    for file in bilt_files:
-        df = load_bilt_data(st.session_state.username, file)
-        bank_data['Bilt'].append(df)
-        all_data.append(df)
-
-    # Find repeating dates for each bank
-    repeated_dates_by_bank = {}
-
-    for bank, dfs in bank_data.items():
-        # Gather unique dates from each file
-        file_dates = [set(df['Date'].unique()) for df in dfs]
-
-        # Find dates that appear in more than one file
-        repeated_dates = set()
-        # Compare all combinations of files within this bank
-        for combo in combinations(range(len(file_dates)), 2):
-            i, j = combo
-            # Find intersection
-            common = file_dates[i].intersection(file_dates[j])
-            repeated_dates.update(common)
-        # Store as list
-        repeated_dates_by_bank[bank] = list(repeated_dates)
-
-
-    # Combine all data
-    if all_data:
-        combined_data = pd.concat(all_data, ignore_index=True)
+        # Ensure proper dtypes and columns
         columns_to_keep = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
-        combined_data = combined_data[columns_to_keep]
-        combined_data = identify_related_refunds(combined_data)
-        combined_data = combined_data.sort_values('Date')
+        # Some banks may not have Category/Is_Return; enforce presence
+        for col in columns_to_keep:
+            if col not in combined_df.columns:
+                combined_df[col] = None if col not in ['Amount', 'Is_Return'] else (0 if col == 'Amount' else False)
 
-        # Step 1: Identify duplicate rows only for repeating dates
-        mask = combined_data.apply(
-            lambda row: row['Date'] in repeated_dates_by_bank.get(row['Bank'], []), axis=1
-        )
+        # Normalize/convert types
+        combined_df['Date'] = pd.to_datetime(combined_df['Date'], errors='coerce')
+        combined_df['Amount'] = pd.to_numeric(combined_df['Amount'], errors='coerce')
+        combined_df['Is_Return'] = combined_df['Is_Return'].fillna(False).astype(bool)
 
-        # Step 2: Separate those rows and remove duplicates
-        repeated_date_rows = combined_data[mask]
-        unique_repeated_date_rows = repeated_date_rows.drop_duplicates()
-
-        # Step 3: Get non-repeated date rows
-        non_repeated_date_rows = combined_data[~mask]
-
-        # Step 4: Concatenate final unique dataframe
-        final_unique_data = pd.concat([unique_repeated_date_rows, non_repeated_date_rows], ignore_index=True)
-
-        return final_unique_data
-    return pd.DataFrame()
-
+        combined_df = combined_df[columns_to_keep]
+        combined_df = identify_related_refunds(combined_df)
+        combined_df = combined_df.sort_values('Date')
+        return combined_df
+    except Exception as e:
+        print(f"Error loading aggregated transactions: {e}")
+        return pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
 
 def identify_related_refunds(df):
     """
@@ -887,7 +835,7 @@ def load_one_time_adjustments():
         print(f"Error loading one time adjustment from S3: {e}")
     return pd.DataFrame(columns=['description','amount','frequency','category','sub_category','start_month','end_month','payment_type','id'])
 
-# Function to save monthly budget data
+# Function to save one time adjustment data
 def save_one_time_adj(df):
     username = st.session_state.username
     budget_file_path = 'one_time_adjustmenta.csv'
@@ -1773,8 +1721,7 @@ else:
                     one_time_adj_df.loc[mask, 'amount'] = amount_ot
                     one_time_adj_df.loc[mask, 'frequency'] = frequency_ot
                     one_time_adj_df.loc[mask, 'category'] = category_ot
-                    one_time_adj_df.loc[
-                        mask, 'sub_category'] = sub_category_ot if sub_category_ot else 'General'
+                    one_time_adj_df.loc[mask, 'sub_category'] = sub_category_ot if sub_category_ot else 'General'
                     one_time_adj_df.loc[mask, 'start_month'] = start_str_ot
                     one_time_adj_df.loc[mask, 'end_month'] = end_str_ot
                     st.success(f"Updated One Time Adjustment item: {description_ot}")
@@ -3136,144 +3083,148 @@ else:
                         st.dataframe(similar_display, use_container_width=True, hide_index=True)
                     else:
                         st.info("No similar transactions found in your data.")
+
+
         with tab7c:
             st.header("Transactions Files Upload")
+            # Select bank folder for upload context
+            bank_options = [
+                "Discover",
+                "Bilt",
+                "Capital One",
+                "Saver One"
+            ]
+            selected_bank = st.selectbox("Select Bank", bank_options, key="upload_bank_select")
+            uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"], key="upload_file_input")
 
-            st.markdown("""
-            Upload your transaction CSV files to the appropriate bank folder.
-            This will make your transaction data available for analysis in the application.
-            """)
+            if uploaded_file is not None and st.button("Process & Append", type="primary", key="process_append_button"):
+                username = st.session_state.username
+                try:
+                    # Read uploaded CSV to DataFrame
+                    uploaded_df = pd.read_csv(uploaded_file)
 
-            # Get list of existing folders in user_transactions_data directory via S3
-            username = st.session_state.username
-            data_dir = 'user_transactions_data'
+                    # Standardize per selected bank using existing loaders by writing temp to buffer
+                    standardized_df = pd.DataFrame(columns=['Date','Description','Category','Amount','Bank','Is_Return'])
 
-            try:
-                # List all files (keys) in the user's transaction data directory
-                _, all_s3_files = list_files_in_user_folder(data_dir, username)
-
-                # Extract unique folder names from file paths
-                folders = set()
-                for file_path in all_s3_files:
-                    # Expect relative paths like 'discover/file.csv'
-                    parts = file_path.split('/')
-                    if len(parts) > 1:  # has a subfolder
-                        folders.add(parts[0])
-                folders = sorted(list(folders))
-            except Exception as e:
-                st.error(f"Error retrieving folders: {str(e)}")
-                folders = []
-
-            # Option to create a new folder
-            create_new_folder = st.checkbox("Create a new bank folder")
-
-            if create_new_folder:
-                new_folder_name = st.text_input("Enter new bank/folder name:")
-                if new_folder_name:
-                    if new_folder_name not in folders and new_folder_name.strip() != '':
-                        if st.button("Create Folder"):
-                            try:
-                                # Create placeholder file to realize the folder in S3
-                                from s3_utils import write_file_to_s3
-                                write_file_to_s3(username, f"{new_folder_name}/.placeholder", "")
-                                st.success(f"Successfully created folder: {new_folder_name}")
-                                folders.append(new_folder_name)
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"Error creating folder: {str(e)}")
-                    else:
-                        st.warning("Folder already exists or invalid name provided.")
-
-            # Folder selection for upload
-            if folders:
-                selected_folder = st.selectbox(
-                    "Select folder for upload:",
-                    options=folders,
-                    format_func=lambda x: x.capitalize()
-                )
-            else:
-                st.warning("No folders found. Please create a folder first.")
-                selected_folder = None
-
-            # File uploader
-            uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
-
-            if uploaded_file is not None:
-                if not selected_folder:
-                    st.warning("Please select or create a folder before uploading a file.")
-                else:
-                    file_details = {
-                        "Filename": uploaded_file.name,
-                        "File size": f"{uploaded_file.size / 1024:.2f} KB"
-                    }
-                    st.write(file_details)
-
-                    # Preview
-                    try:
-
-                        df_preview = pd.read_csv(uploaded_file)
-                        if selected_folder.lower() == "bilt":
-                            df_preview = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
-                                                     names=["Transaction Date",
-                                                                                          "Debit/Credit",
-                                                                                          "Reference Number",
-                                                                                          "Card No.",
-                                                                                          "Description"])
-
-                        st.write("Preview of the uploaded file:")
-                        st.dataframe(df_preview.head(5), use_container_width=True)
-                    except Exception as e:
-                        st.error(f"Error reading the CSV file: {str(e)}")
-                        st.stop()
-
-                    # Check if file exists in S3
-                    from s3_utils import s3_file_exists
-                    s3_key = f"{username}/{data_dir}/{selected_folder}/{uploaded_file.name}"
-                    file_exists = s3_file_exists(s3_key)
-
-                    if file_exists:
-                        overwrite = st.checkbox("A file with this name already exists. Overwrite?")
-                        if not overwrite:
-                            st.stop()
-
-                    if st.button("Save File"):
-                        try:
-                            from s3_utils import write_file_to_s3
-                            # write_file_to_s3 expects (username, relative_path, content_string)
-                            # Relative path inside user_transactions_data/<folder>/<file>
-                            content_str = uploaded_file.getvalue().decode('utf-8')
-                            # If Bilt folder, enforce headers when saving
-                            if selected_folder and selected_folder.lower() == "bilt":
-                                try:
-                                    # df_preview already has correct headers assigned above
-                                    content_str = df_preview.to_csv(index=False)
-                                except Exception:
-                                    # Fallback: re-read and assign headers explicitly
-                                    bilt_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
-                                                          names=["Transaction Date",
-                                                                 "Debit/Credit",
-                                                                 "Reference Number",
-                                                                 "Card No.",
-                                                                 "Description"])
-                                    content_str = bilt_df.to_csv(index=False)
-                            write_file_to_s3(username, f"{selected_folder}/{uploaded_file.name}", content_str)
-                            st.success(f"Successfully saved {uploaded_file.name} to {selected_folder} folder in S3!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error saving file to S3: {str(e)}")
-
-            # Display existing files in folders from S3
-            st.subheader("Existing Transaction Files")
-            if not folders:
-                st.info("No folders available.")
-            else:
-                for folder in folders:
-                    with st.expander(f"{folder.capitalize()} Files"):
-                        # List files in this specific folder
-                        files, rel_paths = list_files_in_user_folder(f"user_transactions_data/{folder}", username)
-                        # Filter out placeholder
-                        display_files = [f for f in files if f != '.placeholder']
-                        if display_files:
-                            st.write(display_files)
+                    # Use per-bank normalization logic
+                    if selected_bank == "Discover":
+                        # Expect Discover columns
+                        df = uploaded_df.copy()
+                        # Convert and rename using same logic as load_discover_data
+                        df['Trans. Date'] = pd.to_datetime(df['Trans. Date'], format='%m/%d/%Y', errors='coerce')
+                        df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+                        df['Is_Return'] = False
+                        df['Bank'] = 'Discover'
+                        df = df.rename(columns={'Trans. Date':'Date','Post Date':'Posted Date'})
+                        if 'Category' not in df.columns:
+                            df['Category'] = None
+                        standardized_df = df.rename(columns={})[
+                            ['Date','Description','Category','Amount','Bank','Is_Return']
+                        ] if 'Description' in df.columns else pd.DataFrame(columns=standardized_df.columns)
+                    elif selected_bank == "Bilt":
+                        df = uploaded_df.copy()
+                        df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], format='%m/%d/%Y', errors='coerce')
+                        df['Debit/Credit'] = pd.to_numeric(df['Debit/Credit'], errors='coerce')
+                        df['Amount'] = df['Debit/Credit'] * -1
+                        df['Is_Return'] = df['Debit/Credit'] > 0
+                        df['Bank'] = 'Bilt'
+                        df = df.rename(columns={'Transaction Date':'Date'})
+                        if 'Category' not in df.columns:
+                            df['Category'] = None
+                        standardized_df = df.rename(columns={})[
+                            ['Date','Description','Category','Amount','Bank','Is_Return']
+                        ] if 'Description' in df.columns else pd.DataFrame(columns=standardized_df.columns)
+                    elif selected_bank == "Capital One":
+                        standardized_df = load_capital_one_data(username, file_name="uploaded.csv")
+                        # replace with uploaded_df processed inline mimicking load_capital_one_data
+                        df = uploaded_df.copy()
+                        # Date
+                        date_col_options = ['Transaction Date','Trans Date','Date','Posted Date','Transaction_Date']
+                        date_col = next((c for c in date_col_options if c in df.columns), None)
+                        df['Date'] = pd.to_datetime(df[date_col], errors='coerce') if date_col else pd.to_datetime('today')
+                        # Amount
+                        debit_col_options = ['Debit','Debit Amount','Amount']
+                        credit_col_options = ['Credit','Credit Amount','Payment']
+                        debit_col = next((c for c in debit_col_options if c in df.columns), None)
+                        credit_col = next((c for c in credit_col_options if c in df.columns), None)
+                        if debit_col and credit_col:
+                            df['Debit'] = pd.to_numeric(df[debit_col], errors='coerce').fillna(0)
+                            df['Credit'] = pd.to_numeric(df[credit_col], errors='coerce').fillna(0)
+                            df['Is_Return'] = (df['Debit'] > 0) & (df['Credit'] > 0) & (df['Debit'] == df['Credit'])
+                            df['Amount'] = df['Debit'] - df['Credit']
+                        elif debit_col:
+                            df['Amount'] = pd.to_numeric(df[debit_col], errors='coerce').fillna(0)
+                            df['Is_Return'] = False
+                        elif credit_col:
+                            df['Amount'] = pd.to_numeric(df[credit_col], errors='coerce').fillna(0)
+                            df['Is_Return'] = False
                         else:
-                            st.info(f"No files in {folder} folder.")
+                            # fallback numeric column
+                            num_col = next((c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])), None)
+                            df['Amount'] = pd.to_numeric(df[num_col], errors='coerce').fillna(0) if num_col else 0
+                            df['Is_Return'] = False
+                        # Description
+                        desc_col_options = ['Description','Desc','Transaction Description','Merchant','Merchant Name']
+                        desc_col = next((c for c in desc_col_options if c in df.columns), None)
+                        df['Description'] = df[desc_col] if desc_col else "Transaction"
+                        # Category
+                        cat_col_options = ['Category','Transaction Category','Type']
+                        cat_col = next((c for c in cat_col_options if c in df.columns), None)
+                        df['Category'] = df[cat_col] if cat_col else 'Uncategorized'
+                        df['Bank'] = 'Capital One'
+                        standardized_df = df[['Date','Description','Category','Amount','Bank','Is_Return']]
+                    elif selected_bank == "Saver One":
+                        df = uploaded_df.copy()
+                        df['Transaction Date'] = pd.to_datetime(df.get('Transaction Date', pd.NaT), errors='coerce')
+                        df['Debit'] = pd.to_numeric(df.get('Debit', 0), errors='coerce').fillna(0)
+                        df['Credit'] = pd.to_numeric(df.get('Credit', 0), errors='coerce').fillna(0)
+                        df['Is_Return'] = df['Credit'] > 0
+                        df['Amount'] = df['Debit'] - df['Credit']
+                        df['Bank'] = 'Saver One'
+                        df = df.rename(columns={'Transaction Date':'Date'})
+                        if 'Category' not in df.columns:
+                            df['Category'] = None
+                        standardized_df = df[['Date','Description','Category','Amount','Bank','Is_Return']] if 'Description' in df.columns else pd.DataFrame(columns=['Date','Description','Category','Amount','Bank','Is_Return'])
+
+                    # Drop rows with missing essential fields
+                    standardized_df = standardized_df.dropna(subset=['Date','Description'])
+                    standardized_df['Date'] = pd.to_datetime(standardized_df['Date'], errors='coerce')
+                    standardized_df['Amount'] = pd.to_numeric(standardized_df['Amount'], errors='coerce')
+                    standardized_df['Is_Return'] = standardized_df['Is_Return'].fillna(False).astype(bool)
+
+                    # Read existing aggregated CSV from S3
+                    existing_content = read_file_from_s3(username, 'user_transactions_data/all_processed_transactions.csv')
+                    if existing_content is not None:
+                        existing_df = pd.read_csv(StringIO(existing_content))
+                        # Normalize existing types
+                        if 'Date' in existing_df.columns:
+                            existing_df['Date'] = pd.to_datetime(existing_df['Date'], errors='coerce')
+                        if 'Amount' in existing_df.columns:
+                            existing_df['Amount'] = pd.to_numeric(existing_df['Amount'], errors='coerce')
+                        if 'Is_Return' in existing_df.columns:
+                            existing_df['Is_Return'] = existing_df['Is_Return'].fillna(False).astype(bool)
+                    else:
+                        existing_df = pd.DataFrame(columns=['Date','Description','Category','Amount','Bank','Is_Return'])
+
+                    # Concatenate and de-duplicate
+                    combined = pd.concat([existing_df, standardized_df], ignore_index=True)
+                    # Define dedup keys
+                    dedup_keys = ['Date','Description','Amount','Bank']
+                    if not set(dedup_keys).issubset(combined.columns):
+                        missing = list(set(dedup_keys) - set(combined.columns))
+                        for m in missing:
+                            combined[m] = None
+                    # Use drop_duplicates on keys
+                    combined = combined.drop_duplicates(subset=dedup_keys, keep='first')
+                    # Sort for consistency
+                    combined = combined.sort_values(by=['Date','Bank','Amount','Description']).reset_index(drop=True)
+
+                    # Write back to S3
+                    from s3_utils import write_file_to_s3
+                    csv_out = combined.to_csv(index=False)
+                    write_file_to_s3(username, 'user_transactions_data/all_processed_transactions.csv', csv_out)
+
+                    st.success("Aggregated transactions updated without duplicates.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to process uploaded file: {e}")
