@@ -2,6 +2,7 @@ from collections import defaultdict
 from itertools import combinations
 
 import streamlit as st
+from streamlit_free_text_select import st_free_text_select
 
 # Import login functionality
 from login import login_page
@@ -45,13 +46,16 @@ st.set_page_config(
 )
 
 # Helper function to load data from S3
-def load_csv_from_s3(username, subfolder, filename):
+def load_csv_from_s3(username, subfolder, filename, **kwargs):
     """Load a CSV file from S3 and return as pandas DataFrame."""
     file_path = f"{subfolder}/{filename}"
     file_content = read_file_from_s3(username, file_path)
 
     if file_content is None:
         return None
+
+    if kwargs.get("separator") == "tab":
+        return pd.read_csv(StringIO(file_content), sep="\t")
 
     # Convert string content to DataFrame using StringIO
     return pd.read_csv(StringIO(file_content))
@@ -277,85 +281,71 @@ def load_saver_one_data(username, file_name):
 
     return df
 
+def load_best_buy_data(username, file_name):
+
+    df = load_csv_from_s3(username=username, subfolder="user_transactions_data/BestBuy", filename=file_name, separator='tab')
+    if df is None:
+        return pd.DataFrame()
+
+    # Convert date column to datetime
+    df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], format='%m/%d/%Y')
+
+    # Convert Debit/Credit to numeric
+    # Strip currency symbols and thousands separators like '$' and ',' before conversion
+    df['Debit/Credit'] = pd.to_numeric(
+        df['Debit/Credit'].astype(str).str.replace(r'[$,]', '', regex=True),
+        errors='coerce'
+    )
+
+    #
+    df['Amount'] = df['Debit/Credit']
+
+    # Flag returns - for Best Buy, returns would typically be indicated by negative values
+    df['Is_Return'] = df['Debit/Credit'] < 0
+
+    # Add a 'Bank' column
+    df['Bank'] = 'Best Buy'
+
+    # Standardize column names
+    df = df.rename(columns={
+        'Transaction Date': 'Date',
+        'Description': 'Description',
+    })
+
+    # If we need a Category column but it doesn't exist
+    if 'Category' not in df.columns:
+        df['Category'] = None
+
+    return df
+
+
 def load_all_transaction_data():
-    """Load all transaction data from different banks, and find repeated dates by Bank."""
-    # Dictionary to hold all dataframes per bank
-    bank_data = defaultdict(list)
-    all_data = []
+    """Load all transaction data from the aggregated S3 CSV for the user."""
+    try:
+        # Attempt to read the combined processed transactions file from S3
+        combined_df = load_csv_from_s3(st.session_state.username, "user_transactions_data", "all_processed_transactions.csv")
+        if combined_df is None or combined_df.empty:
+            return pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
 
-    # Process Discover data
-    discover_files, _ = list_files_in_user_folder("user_transactions_data/discover", st.session_state.username)
-    for file in discover_files:
-        df = load_discover_data(st.session_state.username, file)
-        bank_data['Discover'].append(df)
-        all_data.append(df)
-
-    # Process Capital One data
-    capital_one_files, _ = list_files_in_user_folder("user_transactions_data/Venture_X", st.session_state.username)
-    for file in capital_one_files:
-        df = load_capital_one_data(st.session_state.username, file)
-        bank_data['Capital One'].append(df)
-        all_data.append(df)
-
-    # Process Saver One data
-    saver_one_files, _ = list_files_in_user_folder("user_transactions_data/Saver_one", st.session_state.username)
-    for file in saver_one_files:
-        df = load_saver_one_data(st.session_state.username, file)
-        bank_data['Saver One'].append(df)
-        all_data.append(df)
-
-    # Process Bilt data
-    bilt_files, _ = list_files_in_user_folder("user_transactions_data/bilt", st.session_state.username)
-    for file in bilt_files:
-        df = load_bilt_data(st.session_state.username, file)
-        bank_data['Bilt'].append(df)
-        all_data.append(df)
-
-    # Find repeating dates for each bank
-    repeated_dates_by_bank = {}
-
-    for bank, dfs in bank_data.items():
-        # Gather unique dates from each file
-        file_dates = [set(df['Date'].unique()) for df in dfs]
-
-        # Find dates that appear in more than one file
-        repeated_dates = set()
-        # Compare all combinations of files within this bank
-        for combo in combinations(range(len(file_dates)), 2):
-            i, j = combo
-            # Find intersection
-            common = file_dates[i].intersection(file_dates[j])
-            repeated_dates.update(common)
-        # Store as list
-        repeated_dates_by_bank[bank] = list(repeated_dates)
-
-
-    # Combine all data
-    if all_data:
-        combined_data = pd.concat(all_data, ignore_index=True)
+        # Ensure proper dtypes and columns
         columns_to_keep = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
-        combined_data = combined_data[columns_to_keep]
-        combined_data = identify_related_refunds(combined_data)
-        combined_data = combined_data.sort_values('Date')
+        # Some banks may not have Category/Is_Return; enforce presence
+        for col in columns_to_keep:
+            if col not in combined_df.columns:
+                combined_df[col] = None if col not in ['Amount', 'Is_Return'] else (0 if col == 'Amount' else False)
 
-        # Step 1: Identify duplicate rows only for repeating dates
-        mask = combined_data.apply(
-            lambda row: row['Date'] in repeated_dates_by_bank.get(row['Bank'], []), axis=1
-        )
+        # Normalize/convert types
+        combined_df['Date'] = pd.to_datetime(combined_df['Date'], errors='coerce')
+        combined_df['Amount'] = pd.to_numeric(combined_df['Amount'], errors='coerce')
+        combined_df['Is_Return'] = combined_df['Is_Return'].fillna(False).astype(bool)
 
-        # Step 2: Separate those rows and remove duplicates
-        repeated_date_rows = combined_data[mask]
-        unique_repeated_date_rows = repeated_date_rows.drop_duplicates()
-
-        # Step 3: Get non-repeated date rows
-        non_repeated_date_rows = combined_data[~mask]
-
-        # Step 4: Concatenate final unique dataframe
-        final_unique_data = pd.concat([unique_repeated_date_rows, non_repeated_date_rows], ignore_index=True)
-
-        return final_unique_data
-    return pd.DataFrame()
-
+        combined_df = combined_df[columns_to_keep]
+        combined_df = identify_related_refunds(combined_df)
+        combined_df = combined_df.sort_values('Date')
+        return combined_df
+    except Exception as e:
+        print(f"Error loading aggregated transactions: {e}")
+        return pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
 
 def identify_related_refunds(df):
     """
@@ -887,7 +877,7 @@ def load_one_time_adjustments():
         print(f"Error loading one time adjustment from S3: {e}")
     return pd.DataFrame(columns=['description','amount','frequency','category','sub_category','start_month','end_month','payment_type','id'])
 
-# Function to save monthly budget data
+# Function to save one time adjustment data
 def save_one_time_adj(df):
     username = st.session_state.username
     budget_file_path = 'one_time_adjustmenta.csv'
@@ -1417,7 +1407,10 @@ else:
                                     if st.session_state.get('edit_frequency') in frequency_options else 0,
                                      key=f"frequency_{st.session_state.get('edit_payment_id', 'new')}")
 
-            category = st.text_input("Category", value=st.session_state.get('edit_category', ''))
+            # category = st.text_input("Category", value=st.session_state.get('edit_category', ''))
+            category = st_free_text_select("Category", ["Savings", "India", "Loan", "Mortgage", "Utilities"],
+                                    index=["Savings", "India", "Loan", "Mortgage", "Utilities"].index(st.session_state.get('edit_category', "Savings")),
+                                    key=f"rec_payment_category_{st.session_state.get('edit_category', 'Savings')}")
             sub_category = st.text_input("Sub-category", value=st.session_state.get('edit_sub_category', ''))
 
             # Add payment type dropdown
@@ -1431,7 +1424,7 @@ else:
                 st.session_state['edit_description'] = ''
                 st.session_state['edit_amount'] = 0.0
                 st.session_state['edit_frequency'] = 'Monthly'
-                st.session_state['edit_category'] = ''
+                st.session_state['edit_category'] = 'Savings'
                 st.session_state['edit_sub_category'] = ''
                 st.session_state['edit_start_month'] = datetime.now().replace(day=1).date()
                 st.session_state['edit_end_month'] = datetime.now().replace(day=1).date()
@@ -1581,7 +1574,11 @@ else:
             freq_opts = ["Monthly","Bi-weekly","Weekly","Yearly","Quarterly"]
             frequency_b = st.selectbox("Frequency", freq_opts, index=freq_opts.index(st.session_state.get('edit_budget_frequency','Monthly')) if st.session_state.get('edit_budget_frequency','Monthly') in freq_opts else 0,
                                        key=f"budget_frequency_{st.session_state.get('edit_budget_id', 'new')}")
-            category_b = st.text_input("Category", value=st.session_state.get('edit_budget_category',''))
+            #category_b = st.text_input("Category", value=st.session_state.get('edit_budget_category',''))
+            category_b = st_free_text_select("Category", ["Dining", "Entertainment", "Healthcare", "India", "Loan", "Rent", "Shopping", "Transportation", "Utilities"],
+                                           index=["Dining", "Entertainment", "Healthcare", "India", "Loan", "Rent", "Shopping", "Transportation", "Utilities"].index(
+                                               st.session_state.get('edit_budget_category', "Rent")),
+                                           key=f"budget_category_{st.session_state.get('edit_budget_category', 'Rent')}")
             sub_category_b = st.text_input("Sub-category", value=st.session_state.get('edit_budget_sub_category',''))
             payment_type_b = st.selectbox("Payment Type", ["Fixed","Variable"], index=["Fixed","Variable"].index(st.session_state.get('edit_budget_payment_type','Fixed')),
                                           key=f"budget_payment_type_{st.session_state.get('edit_budget_id', 'new')}")
@@ -1773,8 +1770,7 @@ else:
                     one_time_adj_df.loc[mask, 'amount'] = amount_ot
                     one_time_adj_df.loc[mask, 'frequency'] = frequency_ot
                     one_time_adj_df.loc[mask, 'category'] = category_ot
-                    one_time_adj_df.loc[
-                        mask, 'sub_category'] = sub_category_ot if sub_category_ot else 'General'
+                    one_time_adj_df.loc[mask, 'sub_category'] = sub_category_ot if sub_category_ot else 'General'
                     one_time_adj_df.loc[mask, 'start_month'] = start_str_ot
                     one_time_adj_df.loc[mask, 'end_month'] = end_str_ot
                     st.success(f"Updated One Time Adjustment item: {description_ot}")
@@ -2260,7 +2256,8 @@ else:
         # Time period selection options
         time_filter_option = st.radio(
             "Select Time Filter Type",
-            ["Preset Periods", "Custom Date Range", "Specific Month/Year"]
+            ["Preset Periods", "Custom Date Range", "Specific Month/Year"],
+            key="tab4_time_filter_option"
         )
 
         # Filter based on selected time filter option
@@ -2270,7 +2267,8 @@ else:
             # Original preset time periods
             time_period = st.selectbox(
                 "Select Time Period",
-                ["All Time", "Last 30 Days", "Last 3 Months", "Last 6 Months", "Last Year"]
+                ["All Time", "Last 30 Days", "Last 3 Months", "Last 6 Months", "Last Year"],
+                key="tab4_time_period_select"
             )
 
             # Apply preset filters
@@ -2295,14 +2293,16 @@ else:
                     "Start Date",
                     value=pd.to_datetime(today - pd.Timedelta(days=30)).date(),
                     min_value=expenses_only['Date'].min().date(),
-                    max_value=today.date()
+                    max_value=today.date(),
+                    key="tab4_custom_start_date"
                 )
             with col2:
                 custom_end_date = st.date_input(
                     "End Date",
                     value=today.date(),
                     min_value=expenses_only['Date'].min().date(),
-                    max_value=today.date()
+                    max_value=today.date(),
+                    key="tab4_custom_end_date"
                 )
 
             # Convert to datetime for filtering
@@ -2327,7 +2327,7 @@ else:
             # Year and month selection
             col1, col2 = st.columns(2)
             with col1:
-                selected_year = st.selectbox("Select Year", options=available_years, index=len(available_years)-1)
+                selected_year = st.selectbox("Select Year", options=available_years, index=len(available_years)-1, key="tab4_selected_year")
 
             # Filter months available for the selected year
             available_months = sorted(expenses_only[expenses_only['Year'] == selected_year]['Month'].unique())
@@ -2337,7 +2337,8 @@ else:
                     "Select Month",
                     options=available_months,
                     format_func=lambda x: calendar.month_name[x],
-                    index=min(len(available_months)-1, max(0, datetime.now().month-1) if selected_year == datetime.now().year else 0)
+                    index=min(len(available_months)-1, max(0, datetime.now().month-1) if selected_year == datetime.now().year else 0),
+                    key="tab4_selected_month"
                 )
 
             # Apply month/year filter
@@ -2354,7 +2355,8 @@ else:
             view_type = st.radio(
                 "Select View",
                 ["Categories Only", "Categories with Subcategories"],
-                horizontal=True
+                horizontal=True,
+                key="tab4_view_type"
             )
 
             if view_type == "Categories Only":
@@ -2863,6 +2865,12 @@ else:
                     mime="text/csv",
                 )
 
+            st.subheader("Last Transaction by Bank")
+            st.dataframe(
+                filtered_transactions.sort_values('Date', ascending=False).groupby('Bank', as_index=False).head(1)[['Date', 'Description', 'Category', 'Enhanced_Category', 'Sub_Category', 'Amount', 'Bank']]
+            )
+
+
         with tab7b:
             st.header("Category Management")
 
@@ -2944,6 +2952,39 @@ else:
                             rules_file = os.path.join('core_app_data', 'vendor_rules.csv')
                             if os.path.exists(os.path.dirname(rules_file)):  # Make sure directory exists
                                 updated_rules.to_csv(rules_file, index=False)
+
+                            # Reprocess existing aggregated transactions with the new rules and write back to S3
+                            try:
+                                # Load existing aggregated transactions
+                                existing_df = load_csv_from_s3(st.session_state.username, "user_transactions_data", "all_processed_transactions.csv")
+                                if existing_df is not None and not existing_df.empty:
+                                    # Ensure expected columns and types
+                                    columns_to_keep = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
+                                    for col in columns_to_keep:
+                                        if col not in existing_df.columns:
+                                            existing_df[col] = None if col not in ['Amount', 'Is_Return'] else (0 if col == 'Amount' else False)
+                                    # Normalize types
+                                    existing_df['Date'] = pd.to_datetime(existing_df['Date'], errors='coerce')
+                                    existing_df['Amount'] = pd.to_numeric(existing_df['Amount'], errors='coerce')
+                                    existing_df['Is_Return'] = existing_df['Is_Return'].fillna(False).astype(bool)
+
+                                    # Apply categorization pipeline to include new vendor rules
+                                    categorized = enhanced_categorize_transactions(existing_df)
+
+                                    # Persist back to S3 under the same aggregated file name
+                                    # Keep original base columns plus enhanced fields for downstream usage
+                                    output_df = categorized.copy()
+                                    # For consistency, write Date as date without time
+                                    output_df['Date'] = pd.to_datetime(output_df['Date'], errors='coerce').dt.date
+                                    from s3_utils import write_file_to_s3
+
+                                    csv_out = output_df.to_csv(index=False)
+                                    write_file_to_s3(st.session_state.username, 'all_processed_transactions.csv', csv_out)
+                                else:
+                                    # Nothing to reprocess
+                                    pass
+                            except Exception as re_err:
+                                st.warning(f"Vendor rule saved, but reprocessing transactions failed: {re_err}")
 
                             st.success(f"Added rule for '{pattern}'")
                             st.rerun()  # Refresh to show the new rule
@@ -3040,8 +3081,44 @@ else:
 
                         # Save updated mappings
                         try:
+                            # Save to S3 under user's namespace
+                            from s3_utils import write_file_to_s3 as write_to_s3
+                            csv_content = updated_mappings.to_csv(index=False)
+                            write_to_s3(st.session_state.username, 'Spend_categories.csv', csv_content)
+
+                            # Also update local file for fallback
                             categories_file = os.path.join('user_transactions_data', 'Spend_categories.csv')
-                            updated_mappings.to_csv(categories_file, index=False)
+                            if os.path.exists(os.path.dirname(categories_file)):
+                                updated_mappings.to_csv(categories_file, index=False)
+
+                            # Reprocess existing aggregated transactions with the new manual mappings
+                            try:
+                                existing_df = load_csv_from_s3(st.session_state.username, "user_transactions_data", "all_processed_transactions.csv")
+                                if existing_df is not None and not existing_df.empty:
+                                    # Ensure required columns
+                                    columns_to_keep = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
+                                    for col in columns_to_keep:
+                                        if col not in existing_df.columns:
+                                            existing_df[col] = None if col not in ['Amount', 'Is_Return'] else (0 if col == 'Amount' else False)
+                                    # Normalize types
+                                    existing_df['Date'] = pd.to_datetime(existing_df['Date'], errors='coerce')
+                                    existing_df['Amount'] = pd.to_numeric(existing_df['Amount'], errors='coerce')
+                                    existing_df['Is_Return'] = existing_df['Is_Return'].fillna(False).astype(bool)
+
+                                    # Apply enhanced categorization to reflect manual mappings
+                                    categorized = enhanced_categorize_transactions(existing_df)
+
+                                    # Persist back to S3 (date normalized)
+                                    output_df = categorized.copy()
+                                    output_df['Date'] = pd.to_datetime(output_df['Date'], errors='coerce').dt.date
+                                    csv_out = output_df.to_csv(index=False)
+                                    write_to_s3(st.session_state.username, 'all_processed_transactions.csv', csv_out)
+                                else:
+                                    # Nothing to reprocess
+                                    pass
+                            except Exception as re_err:
+                                st.warning(f"Manual mapping saved, but reprocessing transactions failed: {re_err}")
+
                             st.success(f"Added mapping for '{selected_desc}'")
                             st.rerun()  # Refresh to show the new mapping
                         except Exception as e:
@@ -3136,15 +3213,12 @@ else:
                         st.dataframe(similar_display, use_container_width=True, hide_index=True)
                     else:
                         st.info("No similar transactions found in your data.")
+
+
         with tab7c:
             st.header("Transactions Files Upload")
+            # Select bank folder for upload context
 
-            st.markdown("""
-            Upload your transaction CSV files to the appropriate bank folder.
-            This will make your transaction data available for analysis in the application.
-            """)
-
-            # Get list of existing folders in user_transactions_data directory via S3
             username = st.session_state.username
             data_dir = 'user_transactions_data'
 
@@ -3194,73 +3268,165 @@ else:
             else:
                 st.warning("No folders found. Please create a folder first.")
                 selected_folder = None
+            uploaded_file = st.file_uploader("Choose a CSV file", type=["csv"], key="upload_file_input")
+            # Check if file exists in S3
+            from s3_utils import s3_file_exists, write_file_to_s3
 
-            # File uploader
-            uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+            if uploaded_file:
+                s3_key = f"{username}/{data_dir}/{selected_folder}/{uploaded_file.name}"
+                file_exists = s3_file_exists(s3_key)
 
-            if uploaded_file is not None:
-                if not selected_folder:
-                    st.warning("Please select or create a folder before uploading a file.")
-                else:
-                    file_details = {
-                        "Filename": uploaded_file.name,
-                        "File size": f"{uploaded_file.size / 1024:.2f} KB"
-                    }
-                    st.write(file_details)
+                # Preview
+                try:
+                    df_preview = pd.read_csv(uploaded_file)
+                    if selected_folder.lower() == "bilt":
+                        df_preview = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                 names=["Transaction Date",
+                                                        "Debit/Credit",
+                                                        "Reference Number",
+                                                        "Card No.",
+                                                        "Description"])
+                    elif selected_folder.lower() == "bestbuy":
+                        df_preview = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                     sep="\t",
+                                                      names=["Transaction Date",
+                                                             "Debit/Credit",
+                                                             "Description",
+                                                             "Transaction Type"])
 
-                    # Preview
-                    try:
+                    st.write("Preview of the uploaded file:")
+                    st.dataframe(df_preview.head(5), use_container_width=True)
+                except Exception as e:
+                    st.error(f"Error reading the CSV file: {str(e)}")
+                    st.stop()
 
-                        df_preview = pd.read_csv(uploaded_file)
-                        if selected_folder.lower() == "bilt":
-                            df_preview = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
-                                                     names=["Transaction Date",
-                                                                                          "Debit/Credit",
-                                                                                          "Reference Number",
-                                                                                          "Card No.",
-                                                                                          "Description"])
-
-                        st.write("Preview of the uploaded file:")
-                        st.dataframe(df_preview.head(5), use_container_width=True)
-                    except Exception as e:
-                        st.error(f"Error reading the CSV file: {str(e)}")
+                if file_exists:
+                    overwrite = st.checkbox("A file with this name already exists. Overwrite?")
+                    if not overwrite:
                         st.stop()
 
-                    # Check if file exists in S3
-                    from s3_utils import s3_file_exists
-                    s3_key = f"{username}/{data_dir}/{selected_folder}/{uploaded_file.name}"
-                    file_exists = s3_file_exists(s3_key)
+            if uploaded_file is not None and st.button("Process & Append", type="primary", key="process_append_button"):
 
-                    if file_exists:
-                        overwrite = st.checkbox("A file with this name already exists. Overwrite?")
-                        if not overwrite:
-                            st.stop()
+                try:
 
-                    if st.button("Save File"):
+                    content_str = uploaded_file.getvalue().decode('utf-8')
+                    # If Bilt folder, enforce headers when saving
+                    if selected_folder and selected_folder.lower() == "bilt":
                         try:
-                            from s3_utils import write_file_to_s3
-                            # write_file_to_s3 expects (username, relative_path, content_string)
-                            # Relative path inside user_transactions_data/<folder>/<file>
-                            content_str = uploaded_file.getvalue().decode('utf-8')
-                            # If Bilt folder, enforce headers when saving
-                            if selected_folder and selected_folder.lower() == "bilt":
-                                try:
-                                    # df_preview already has correct headers assigned above
-                                    content_str = df_preview.to_csv(index=False)
-                                except Exception:
-                                    # Fallback: re-read and assign headers explicitly
-                                    bilt_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
-                                                          names=["Transaction Date",
-                                                                 "Debit/Credit",
-                                                                 "Reference Number",
-                                                                 "Card No.",
-                                                                 "Description"])
-                                    content_str = bilt_df.to_csv(index=False)
-                            write_file_to_s3(username, f"{selected_folder}/{uploaded_file.name}", content_str)
-                            st.success(f"Successfully saved {uploaded_file.name} to {selected_folder} folder in S3!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Error saving file to S3: {str(e)}")
+                            # df_preview already has correct headers assigned above
+                            content_str = df_preview.to_csv(index=False)
+                        except Exception:
+                            # Fallback: re-read and assign headers explicitly
+                            bilt_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                  names=["Transaction Date",
+                                                         "Debit/Credit",
+                                                         "Reference Number",
+                                                         "Card No.",
+                                                         "Description"])
+                            content_str = bilt_df.to_csv(index=False)
+                    elif selected_folder and selected_folder.lower() == "bestbuy":
+                        try:
+                            # df_preview already has correct headers assigned above
+                            content_str = df_preview.to_csv(index=False, sep="\t")
+                        except Exception:
+                            # Fallback: re-read and assign headers explicitly
+                            bestbuy_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                     sep="\t",
+                                                      names=["Transaction Date",
+                                                             "Debit/Credit",
+                                                             "Description",
+                                                             "Transaction Type"])
+                            content_str = bestbuy_df.to_csv(index=False, sep="\t")
+                    write_file_to_s3(username, f"{selected_folder}/{uploaded_file.name}", content_str)
+                    st.success(f"Successfully saved {uploaded_file.name} to {selected_folder} folder in S3!")
+
+                    # Processing new file
+                    columns_to_keep = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
+                    if selected_folder.lower() == "bilt":
+                        new_df = load_bilt_data(username, uploaded_file.name)
+                    elif selected_folder.lower() == "discover":
+                        new_df = load_discover_data(username, uploaded_file.name)
+                    elif selected_folder.lower() == "saver_one":
+                        new_df = load_saver_one_data(username, uploaded_file.name)
+                    elif selected_folder.lower() == "venture_x":
+                        new_df = load_capital_one_data(username, uploaded_file.name)
+                    elif selected_folder.lower() == "bestbuy":
+                        new_df = load_best_buy_data(username, uploaded_file.name)
+                    else:
+                        new_df = pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
+                    new_df = new_df[columns_to_keep]
+                    new_df['Date'] = new_df['Date'].dt.date
+
+                    # process input transaction data
+                    processed_df = enhanced_categorize_transactions(new_df)
+
+                    # Read existing aggregated CSV from S3
+                    existing_df = load_csv_from_s3(st.session_state.username, "user_transactions_data", "all_processed_transactions.csv")
+                    if existing_df is None or existing_df.empty:
+                        existing_df = pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
+
+                    # Concatenate and de-duplicate
+                    # Prepare bank name mapping based on selected folder
+                    folder_bank_map = {
+                        'discover': 'Discover',
+                        'bilt': 'Bilt',
+                        'venture_x': 'Capital One',
+                        'Venture_X': 'Capital One',
+                        'saver_one': 'Saver One',
+                        'Savor_one': 'Saver One',
+                        'BestBuy': 'Best Buy',
+                        'bestbuy': 'Best Buy',
+                    }
+                    sel_folder_key = (selected_folder or '').lower()
+                    bank_for_folder = folder_bank_map.get(sel_folder_key, selected_folder)
+
+                    # Ensure date types are consistent for comparison
+                    if 'Date' in existing_df.columns and not existing_df.empty:
+                        existing_df['Date'] = pd.to_datetime(existing_df['Date'], errors='coerce').dt.date
+
+                    # Define dedup keys
+                    dedup_keys = ['Date', 'Description', 'Amount', 'Bank']
+                    # Ensure required columns exist in both dataframes
+                    for m in dedup_keys:
+                        if m not in processed_df.columns:
+                            processed_df[m] = None
+                        if m not in existing_df.columns:
+                            existing_df[m] = None
+
+                    # Filter existing_df to only same bank and dates present in processed_df
+                    new_dates = set(processed_df['Date'].dropna().tolist())
+                    if bank_for_folder is not None and len(new_dates) > 0:
+                        existing_subset = existing_df[(existing_df['Bank'] == bank_for_folder) & (existing_df['Date'].isin(new_dates))]
+                    else:
+                        existing_subset = pd.DataFrame(columns=existing_df.columns)
+
+                    # Remove duplicates between processed_df and existing_subset on dedup_keys (left-anti join)
+                    if not existing_subset.empty:
+                        # Keep only rows in processed_df that do not match existing_subset on the dedup keys
+                        existing_keys = existing_subset[dedup_keys].drop_duplicates()
+                        merged = processed_df.merge(existing_keys, on=dedup_keys, how='left', indicator=True)
+                        unique_processed_df = merged[merged['_merge'] == 'left_only'].drop(columns=['_merge'])
+                    else:
+                        unique_processed_df = processed_df
+
+                    # Concatenate existing with unique new records (no further global duplicate removal)
+                    concat_df = pd.concat([existing_df, unique_processed_df], ignore_index=True)
+
+                    # Sort for consistency
+                    concat_df = concat_df.sort_values(by=['Date', 'Bank', 'Amount', 'Description']).reset_index(drop=True)
+
+                    # Write back to S3
+                    from s3_utils import write_file_to_s3
+
+                    csv_out = concat_df.to_csv(index=False)
+                    write_file_to_s3(username, 'all_processed_transactions.csv', csv_out)
+
+                    st.success("Aggregated transactions updated without duplicates (same bank & new file dates only).")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Failed to process uploaded file: {e}")
+
+
 
             # Display existing files in folders from S3
             st.subheader("Existing Transaction Files")
@@ -3270,7 +3436,8 @@ else:
                 for folder in folders:
                     with st.expander(f"{folder.capitalize()} Files"):
                         # List files in this specific folder
-                        files, rel_paths = list_files_in_user_folder(f"user_transactions_data/{folder}", username)
+                        files, rel_paths = list_files_in_user_folder(f"user_transactions_data/{folder}",
+                                                                     username)
                         # Filter out placeholder
                         display_files = [f for f in files if f != '.placeholder']
                         if display_files:

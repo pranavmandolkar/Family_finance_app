@@ -73,6 +73,7 @@ def read_file_from_s3(username, file_name):
     try:
         response = s3_client.get_object(Bucket=BUCKET_NAME, Key=s3_path)
         content = response['Body'].read().decode('utf-8')
+
         return content
     except ClientError as e:
         if e.response['Error']['Code'] == 'NoSuchKey':

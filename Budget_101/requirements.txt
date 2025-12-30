@@ -6,4 +6,4 @@ plotly>=5.8.0
 pillow>=9.0.0
 numpy>=1.20.0
 boto3>=1.40.55
-
+streamlit-free-text-select==0.3.0
