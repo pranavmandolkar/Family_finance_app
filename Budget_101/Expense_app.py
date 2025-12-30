@@ -2,6 +2,7 @@ from collections import defaultdict
 from itertools import combinations
 
 import streamlit as st
+from streamlit_free_text_select import st_free_text_select
 
 # Import login functionality
 from login import login_page
@@ -45,13 +46,16 @@ st.set_page_config(
 )
 
 # Helper function to load data from S3
-def load_csv_from_s3(username, subfolder, filename):
+def load_csv_from_s3(username, subfolder, filename, **kwargs):
     """Load a CSV file from S3 and return as pandas DataFrame."""
     file_path = f"{subfolder}/{filename}"
     file_content = read_file_from_s3(username, file_path)
 
     if file_content is None:
         return None
+
+    if kwargs.get("separator") == "tab":
+        return pd.read_csv(StringIO(file_content), sep="\t")
 
     # Convert string content to DataFrame using StringIO
     return pd.read_csv(StringIO(file_content))
@@ -276,6 +280,44 @@ def load_saver_one_data(username, file_name):
     })
 
     return df
+
+def load_best_buy_data(username, file_name):
+
+    df = load_csv_from_s3(username=username, subfolder="user_transactions_data/BestBuy", filename=file_name, separator='tab')
+    if df is None:
+        return pd.DataFrame()
+
+    # Convert date column to datetime
+    df['Transaction Date'] = pd.to_datetime(df['Transaction Date'], format='%m/%d/%Y')
+
+    # Convert Debit/Credit to numeric
+    # Strip currency symbols and thousands separators like '$' and ',' before conversion
+    df['Debit/Credit'] = pd.to_numeric(
+        df['Debit/Credit'].astype(str).str.replace(r'[$,]', '', regex=True),
+        errors='coerce'
+    )
+
+    #
+    df['Amount'] = df['Debit/Credit']
+
+    # Flag returns - for Best Buy, returns would typically be indicated by negative values
+    df['Is_Return'] = df['Debit/Credit'] < 0
+
+    # Add a 'Bank' column
+    df['Bank'] = 'Best Buy'
+
+    # Standardize column names
+    df = df.rename(columns={
+        'Transaction Date': 'Date',
+        'Description': 'Description',
+    })
+
+    # If we need a Category column but it doesn't exist
+    if 'Category' not in df.columns:
+        df['Category'] = None
+
+    return df
+
 
 def load_all_transaction_data():
     """Load all transaction data from the aggregated S3 CSV for the user."""
@@ -1365,7 +1407,10 @@ else:
                                     if st.session_state.get('edit_frequency') in frequency_options else 0,
                                      key=f"frequency_{st.session_state.get('edit_payment_id', 'new')}")
 
-            category = st.text_input("Category", value=st.session_state.get('edit_category', ''))
+            # category = st.text_input("Category", value=st.session_state.get('edit_category', ''))
+            category = st_free_text_select("Category", ["Savings", "India", "Loan", "Mortgage", "Utilities"],
+                                    index=["Savings", "India", "Loan", "Mortgage", "Utilities"].index(st.session_state.get('edit_category', "Savings")),
+                                    key=f"rec_payment_category_{st.session_state.get('edit_category', 'Savings')}")
             sub_category = st.text_input("Sub-category", value=st.session_state.get('edit_sub_category', ''))
 
             # Add payment type dropdown
@@ -1379,7 +1424,7 @@ else:
                 st.session_state['edit_description'] = ''
                 st.session_state['edit_amount'] = 0.0
                 st.session_state['edit_frequency'] = 'Monthly'
-                st.session_state['edit_category'] = ''
+                st.session_state['edit_category'] = 'Savings'
                 st.session_state['edit_sub_category'] = ''
                 st.session_state['edit_start_month'] = datetime.now().replace(day=1).date()
                 st.session_state['edit_end_month'] = datetime.now().replace(day=1).date()
@@ -1529,7 +1574,11 @@ else:
             freq_opts = ["Monthly","Bi-weekly","Weekly","Yearly","Quarterly"]
             frequency_b = st.selectbox("Frequency", freq_opts, index=freq_opts.index(st.session_state.get('edit_budget_frequency','Monthly')) if st.session_state.get('edit_budget_frequency','Monthly') in freq_opts else 0,
                                        key=f"budget_frequency_{st.session_state.get('edit_budget_id', 'new')}")
-            category_b = st.text_input("Category", value=st.session_state.get('edit_budget_category',''))
+            #category_b = st.text_input("Category", value=st.session_state.get('edit_budget_category',''))
+            category_b = st_free_text_select("Category", ["Dining", "Entertainment", "Healthcare", "India", "Loan", "Rent", "Shopping", "Transportation", "Utilities"],
+                                           index=["Dining", "Entertainment", "Healthcare", "India", "Loan", "Rent", "Shopping", "Transportation", "Utilities"].index(
+                                               st.session_state.get('edit_budget_category', "Rent")),
+                                           key=f"budget_category_{st.session_state.get('edit_budget_category', 'Rent')}")
             sub_category_b = st.text_input("Sub-category", value=st.session_state.get('edit_budget_sub_category',''))
             payment_type_b = st.selectbox("Payment Type", ["Fixed","Variable"], index=["Fixed","Variable"].index(st.session_state.get('edit_budget_payment_type','Fixed')),
                                           key=f"budget_payment_type_{st.session_state.get('edit_budget_id', 'new')}")
@@ -2927,9 +2976,10 @@ else:
                                     output_df = categorized.copy()
                                     # For consistency, write Date as date without time
                                     output_df['Date'] = pd.to_datetime(output_df['Date'], errors='coerce').dt.date
-                                    from s3_utils import write_file_to_s3 as write_to_s3
+                                    from s3_utils import write_file_to_s3
+
                                     csv_out = output_df.to_csv(index=False)
-                                    write_to_s3(st.session_state.username, 'all_processed_transactions.csv', csv_out)
+                                    write_file_to_s3(st.session_state.username, 'all_processed_transactions.csv', csv_out)
                                 else:
                                     # Nothing to reprocess
                                     pass
@@ -3031,8 +3081,44 @@ else:
 
                         # Save updated mappings
                         try:
+                            # Save to S3 under user's namespace
+                            from s3_utils import write_file_to_s3 as write_to_s3
+                            csv_content = updated_mappings.to_csv(index=False)
+                            write_to_s3(st.session_state.username, 'Spend_categories.csv', csv_content)
+
+                            # Also update local file for fallback
                             categories_file = os.path.join('user_transactions_data', 'Spend_categories.csv')
-                            updated_mappings.to_csv(categories_file, index=False)
+                            if os.path.exists(os.path.dirname(categories_file)):
+                                updated_mappings.to_csv(categories_file, index=False)
+
+                            # Reprocess existing aggregated transactions with the new manual mappings
+                            try:
+                                existing_df = load_csv_from_s3(st.session_state.username, "user_transactions_data", "all_processed_transactions.csv")
+                                if existing_df is not None and not existing_df.empty:
+                                    # Ensure required columns
+                                    columns_to_keep = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
+                                    for col in columns_to_keep:
+                                        if col not in existing_df.columns:
+                                            existing_df[col] = None if col not in ['Amount', 'Is_Return'] else (0 if col == 'Amount' else False)
+                                    # Normalize types
+                                    existing_df['Date'] = pd.to_datetime(existing_df['Date'], errors='coerce')
+                                    existing_df['Amount'] = pd.to_numeric(existing_df['Amount'], errors='coerce')
+                                    existing_df['Is_Return'] = existing_df['Is_Return'].fillna(False).astype(bool)
+
+                                    # Apply enhanced categorization to reflect manual mappings
+                                    categorized = enhanced_categorize_transactions(existing_df)
+
+                                    # Persist back to S3 (date normalized)
+                                    output_df = categorized.copy()
+                                    output_df['Date'] = pd.to_datetime(output_df['Date'], errors='coerce').dt.date
+                                    csv_out = output_df.to_csv(index=False)
+                                    write_to_s3(st.session_state.username, 'all_processed_transactions.csv', csv_out)
+                                else:
+                                    # Nothing to reprocess
+                                    pass
+                            except Exception as re_err:
+                                st.warning(f"Manual mapping saved, but reprocessing transactions failed: {re_err}")
+
                             st.success(f"Added mapping for '{selected_desc}'")
                             st.rerun()  # Refresh to show the new mapping
                         except Exception as e:
@@ -3200,6 +3286,13 @@ else:
                                                         "Reference Number",
                                                         "Card No.",
                                                         "Description"])
+                    elif selected_folder.lower() == "bestbuy":
+                        df_preview = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                     sep="\t",
+                                                      names=["Transaction Date",
+                                                             "Debit/Credit",
+                                                             "Description",
+                                                             "Transaction Type"])
 
                     st.write("Preview of the uploaded file:")
                     st.dataframe(df_preview.head(5), use_container_width=True)
@@ -3231,6 +3324,19 @@ else:
                                                          "Card No.",
                                                          "Description"])
                             content_str = bilt_df.to_csv(index=False)
+                    elif selected_folder and selected_folder.lower() == "bestbuy":
+                        try:
+                            # df_preview already has correct headers assigned above
+                            content_str = df_preview.to_csv(index=False, sep="\t")
+                        except Exception:
+                            # Fallback: re-read and assign headers explicitly
+                            bestbuy_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                                                     sep="\t",
+                                                      names=["Transaction Date",
+                                                             "Debit/Credit",
+                                                             "Description",
+                                                             "Transaction Type"])
+                            content_str = bestbuy_df.to_csv(index=False, sep="\t")
                     write_file_to_s3(username, f"{selected_folder}/{uploaded_file.name}", content_str)
                     st.success(f"Successfully saved {uploaded_file.name} to {selected_folder} folder in S3!")
 
@@ -3244,10 +3350,15 @@ else:
                         new_df = load_saver_one_data(username, uploaded_file.name)
                     elif selected_folder.lower() == "venture_x":
                         new_df = load_capital_one_data(username, uploaded_file.name)
+                    elif selected_folder.lower() == "bestbuy":
+                        new_df = load_best_buy_data(username, uploaded_file.name)
                     else:
                         new_df = pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
                     new_df = new_df[columns_to_keep]
                     new_df['Date'] = new_df['Date'].dt.date
+
+                    # process input transaction data
+                    processed_df = enhanced_categorize_transactions(new_df)
 
                     # Read existing aggregated CSV from S3
                     existing_df = load_csv_from_s3(st.session_state.username, "user_transactions_data", "all_processed_transactions.csv")
@@ -3263,6 +3374,8 @@ else:
                         'Venture_X': 'Capital One',
                         'saver_one': 'Saver One',
                         'Savor_one': 'Saver One',
+                        'BestBuy': 'Best Buy',
+                        'bestbuy': 'Best Buy',
                     }
                     sel_folder_key = (selected_folder or '').lower()
                     bank_for_folder = folder_bank_map.get(sel_folder_key, selected_folder)
@@ -3275,29 +3388,29 @@ else:
                     dedup_keys = ['Date', 'Description', 'Amount', 'Bank']
                     # Ensure required columns exist in both dataframes
                     for m in dedup_keys:
-                        if m not in new_df.columns:
-                            new_df[m] = None
+                        if m not in processed_df.columns:
+                            processed_df[m] = None
                         if m not in existing_df.columns:
                             existing_df[m] = None
 
-                    # Filter existing_df to only same bank and dates present in new_df
-                    new_dates = set(new_df['Date'].dropna().tolist())
+                    # Filter existing_df to only same bank and dates present in processed_df
+                    new_dates = set(processed_df['Date'].dropna().tolist())
                     if bank_for_folder is not None and len(new_dates) > 0:
                         existing_subset = existing_df[(existing_df['Bank'] == bank_for_folder) & (existing_df['Date'].isin(new_dates))]
                     else:
                         existing_subset = pd.DataFrame(columns=existing_df.columns)
 
-                    # Remove duplicates between new_df and existing_subset on dedup_keys (left-anti join)
+                    # Remove duplicates between processed_df and existing_subset on dedup_keys (left-anti join)
                     if not existing_subset.empty:
-                        # Keep only rows in new_df that do not match existing_subset on the dedup keys
+                        # Keep only rows in processed_df that do not match existing_subset on the dedup keys
                         existing_keys = existing_subset[dedup_keys].drop_duplicates()
-                        merged = new_df.merge(existing_keys, on=dedup_keys, how='left', indicator=True)
-                        unique_new_df = merged[merged['_merge'] == 'left_only'].drop(columns=['_merge'])
+                        merged = processed_df.merge(existing_keys, on=dedup_keys, how='left', indicator=True)
+                        unique_processed_df = merged[merged['_merge'] == 'left_only'].drop(columns=['_merge'])
                     else:
-                        unique_new_df = new_df
+                        unique_processed_df = processed_df
 
                     # Concatenate existing with unique new records (no further global duplicate removal)
-                    concat_df = pd.concat([existing_df, unique_new_df], ignore_index=True)
+                    concat_df = pd.concat([existing_df, unique_processed_df], ignore_index=True)
 
                     # Sort for consistency
                     concat_df = concat_df.sort_values(by=['Date', 'Bank', 'Amount', 'Description']).reset_index(drop=True)
