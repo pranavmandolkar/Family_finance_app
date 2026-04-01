@@ -87,12 +87,12 @@ def load_discover_data(username, file_name):
     })
     return df
 
-def load_bilt_data(username, file_name):
-    """Load and process Bilt transaction data from S3.
-    Note: For Bilt, credit and debit are reversed from the standard convention.
+def load_old_bilt_data(username, file_name):
+    """Load and process old_bilt transaction data from S3.
+    Note: For old_bilt, credit and debit are reversed from the standard convention.
     Negative values in the 'Debit/Credit' column represent expenses (debits).
     Positive values in the 'Debit/Credit' column represent payments/credits."""
-    df = load_csv_from_s3(username, "user_transactions_data/bilt", file_name)
+    df = load_csv_from_s3(username, "user_transactions_data/old_bilt", file_name)
     if df is None:
         return pd.DataFrame()
 
@@ -102,15 +102,15 @@ def load_bilt_data(username, file_name):
     # Convert Debit/Credit to numeric
     df['Debit/Credit'] = pd.to_numeric(df['Debit/Credit'], errors='coerce')
 
-    # For Bilt: Negative values are expenses (debits), positive values are payments (credits)
+    # For old_bilt: Negative values are expenses (debits), positive values are payments (credits)
     # This is the opposite of our standard convention, so we'll multiply by -1
     df['Amount'] = df['Debit/Credit'] * -1
 
-    # Flag returns - for Bilt, returns would typically be indicated by positive values
+    # Flag returns - for old_bilt, returns would typically be indicated by positive values
     df['Is_Return'] = df['Debit/Credit'] > 0
 
     # Add a 'Bank' column
-    df['Bank'] = 'Bilt'
+    df['Bank'] = 'old_bilt'
 
     # Standardize column names
     df = df.rename(columns={
@@ -313,6 +313,34 @@ def load_best_buy_data(username, file_name):
     })
 
     # If we need a Category column but it doesn't exist
+    if 'Category' not in df.columns:
+        df['Category'] = None
+
+    return df
+
+
+def load_bilt_data(username, file_name):
+    """Load and process Bilt card transaction data from S3."""
+    df = load_csv_from_s3(username, "user_transactions_data/Bilt", file_name)
+    if df is None:
+        return pd.DataFrame()
+
+    # Convert date column to datetime (ISO format YYYY-MM-DD)
+    df['Transaction Date'] = pd.to_datetime(df['Transaction Date'])
+
+    # Convert Amount to numeric
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce').fillna(0)
+
+    # Flag returns/payments - negative amounts are payments or credits
+    df['Is_Return'] = df['Amount'] < 0
+
+    # Add a 'Bank' column
+    df['Bank'] = 'Bilt'
+
+    # Standardize column names
+    df = df.rename(columns={'Transaction Date': 'Date'})
+
+    # If no Category column exists, add one
     if 'Category' not in df.columns:
         df['Category'] = None
 
@@ -3279,7 +3307,7 @@ else:
                 # Preview
                 try:
                     df_preview = pd.read_csv(uploaded_file)
-                    if selected_folder.lower() == "bilt":
+                    if selected_folder.lower() == "old_bilt":
                         df_preview = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
                                                  names=["Transaction Date",
                                                         "Debit/Credit",
@@ -3310,20 +3338,20 @@ else:
                 try:
 
                     content_str = uploaded_file.getvalue().decode('utf-8')
-                    # If Bilt folder, enforce headers when saving
-                    if selected_folder and selected_folder.lower() == "bilt":
+                    # If old_bilt folder, enforce headers when saving
+                    if selected_folder and selected_folder.lower() == "old_bilt":
                         try:
                             # df_preview already has correct headers assigned above
                             content_str = df_preview.to_csv(index=False)
                         except Exception:
                             # Fallback: re-read and assign headers explicitly
-                            bilt_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
+                            old_bilt_df = pd.read_csv(StringIO(uploaded_file.getvalue().decode("utf-8")), header=None,
                                                   names=["Transaction Date",
                                                          "Debit/Credit",
                                                          "Reference Number",
                                                          "Card No.",
                                                          "Description"])
-                            content_str = bilt_df.to_csv(index=False)
+                            content_str = old_bilt_df.to_csv(index=False)
                     elif selected_folder and selected_folder.lower() == "bestbuy":
                         try:
                             # df_preview already has correct headers assigned above
@@ -3342,8 +3370,8 @@ else:
 
                     # Processing new file
                     columns_to_keep = ['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return']
-                    if selected_folder.lower() == "bilt":
-                        new_df = load_bilt_data(username, uploaded_file.name)
+                    if selected_folder.lower() == "old_bilt":
+                        new_df = load_old_bilt_data(username, uploaded_file.name)
                     elif selected_folder.lower() == "discover":
                         new_df = load_discover_data(username, uploaded_file.name)
                     elif selected_folder.lower() == "saver_one":
@@ -3352,6 +3380,8 @@ else:
                         new_df = load_capital_one_data(username, uploaded_file.name)
                     elif selected_folder.lower() == "bestbuy":
                         new_df = load_best_buy_data(username, uploaded_file.name)
+                    elif selected_folder.lower() == "bilt":
+                        new_df = load_bilt_data(username, uploaded_file.name)
                     else:
                         new_df = pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
                     new_df = new_df[columns_to_keep]
@@ -3369,7 +3399,7 @@ else:
                     # Prepare bank name mapping based on selected folder
                     folder_bank_map = {
                         'discover': 'Discover',
-                        'bilt': 'Bilt',
+                        'old_bilt': 'old_bilt',
                         'venture_x': 'Capital One',
                         'Venture_X': 'Capital One',
                         'saver_one': 'Saver One',
