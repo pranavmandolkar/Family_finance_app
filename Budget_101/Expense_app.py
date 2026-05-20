@@ -348,11 +348,12 @@ def load_bilt_data(username, file_name):
     return df
 
 
-def load_all_transaction_data():
+@st.cache_data(ttl=300, show_spinner=False)
+def load_all_transaction_data(username):
     """Load all transaction data from the aggregated S3 CSV for the user."""
     try:
         # Attempt to read the combined processed transactions file from S3
-        combined_df = load_csv_from_s3(st.session_state.username, "user_transactions_data", "all_processed_transactions.csv")
+        combined_df = load_csv_from_s3(username, "user_transactions_data", "all_processed_transactions.csv")
         if combined_df is None or combined_df.empty:
             return pd.DataFrame(columns=['Date', 'Description', 'Category', 'Amount', 'Bank', 'Is_Return'])
 
@@ -574,9 +575,8 @@ def enhanced_categorize_transactions(df):
     return categorized_df
 
 # Function to load income data
-def load_income_data():
-    # Get username from session state
-    username = st.session_state.username
+@st.cache_data(ttl=300, show_spinner=False)
+def load_income_data(username):
     income_file_path = 'income_data.csv'
 
     # Try to load from S3 using the username
@@ -605,9 +605,8 @@ def load_income_data():
     return pd.DataFrame(columns=['person', 'income_source', 'amount', 'frequency', 'start_month', 'end_month', 'id'])
 
 # Function to load recurring payment data
-def load_recurring_payments():
-    # Get username from session state
-    username = st.session_state.username
+@st.cache_data(ttl=300, show_spinner=False)
+def load_recurring_payments(username):
     payments_file_path = 'recurring_payments.csv'
 
     # Try to load from S3 using the username
@@ -660,6 +659,7 @@ def save_income_data(df):
         # Save to S3
         from s3_utils import write_file_to_s3
         write_file_to_s3(username, income_file_path, csv_content)
+        load_income_data.clear()
     except Exception as e:
         print(f"Error saving income data to S3: {str(e)}")
         # Fallback to local save if S3 fails
@@ -699,6 +699,7 @@ def save_recurring_payments(df):
         # Save to S3
         from s3_utils import write_file_to_s3
         write_file_to_s3(username, payments_file_path, csv_content)
+        load_recurring_payments.clear()
     except Exception as e:
         print(f"Error saving recurring payments data to S3: {str(e)}")
         # Fallback to local save if S3 fails
@@ -709,21 +710,16 @@ RECURRING_CATEGORIES_DEFAULT = ["Day care", "India", "Loan", "Mortgage", "Saving
 BUDGET_CATEGORIES_DEFAULT = ["Day care", "Dining", "Entertainment", "Healthcare", "India", "Loan", "Rent", "Shopping", "Transportation", "Utilities"]
 
 
-def load_custom_categories():
-    if 'custom_categories_cache' in st.session_state:
-        return st.session_state.custom_categories_cache
-    username = st.session_state.username
+@st.cache_data(ttl=300, show_spinner=False)
+def load_custom_categories(username):
     try:
         file_content = read_file_from_s3(username, 'custom_categories.json')
         if file_content is not None:
             data = json.loads(file_content)
-            st.session_state.custom_categories_cache = data
             return data
     except Exception:
         pass
-    default = {"recurring_categories": [], "budget_categories": [], "subcategories": {"Day care": ["Day care"]}}
-    st.session_state.custom_categories_cache = default
-    return default
+    return {"recurring_categories": [], "budget_categories": [], "subcategories": {"Day care": ["Day care"]}}
 
 
 def save_custom_categories(data):
@@ -732,6 +728,7 @@ def save_custom_categories(data):
     try:
         from s3_utils import write_file_to_s3
         write_file_to_s3(username, 'custom_categories.json', json.dumps(data, indent=2))
+        load_custom_categories.clear()
     except Exception as e:
         print(f"Error saving custom categories: {str(e)}")
 
@@ -875,8 +872,8 @@ def calculate_active_monthly_payments(payment_data, reference_date=None):
     return 0.0
 
 # Function to load monthly budget data (similar structure to recurring payments)
-def load_monthly_budget():
-    username = st.session_state.username
+@st.cache_data(ttl=300, show_spinner=False)
+def load_monthly_budget(username):
     budget_file_path = 'monthly_budget.csv'
     try:
         file_content = read_file_from_s3(username, budget_file_path)
@@ -906,8 +903,8 @@ def load_monthly_budget():
         print(f"Error loading monthly budget from S3: {e}")
     return pd.DataFrame(columns=['description','amount','frequency','category','sub_category','start_month','end_month','payment_type','id'])
 
-def load_one_time_adjustments():
-    username = st.session_state.username
+@st.cache_data(ttl=300, show_spinner=False)
+def load_one_time_adjustments(username):
     one_time_adj_file_path = 'one_time_adjustmenta.csv'
     try:
         file_content = read_file_from_s3(username, one_time_adj_file_path)
@@ -966,6 +963,7 @@ def save_monthly_budget(df):
         from s3_utils import write_file_to_s3
         csv_content = save_df.to_csv(index=False)
         write_file_to_s3(username, budget_file_path, csv_content)
+        load_monthly_budget.clear()
     except Exception as e:
         print(f"Error saving monthly budget to S3: {e}")
 
@@ -990,9 +988,81 @@ st.markdown("""
     Upload your transaction files in the user_transactions_data directory organized by bank name.
 """)
 
+st.markdown("""
+<style>
+/* ── Metric cards ── */
+[data-testid="metric-container"] {
+    background: #f8f9fb;
+    border: 1px solid #e2e6ea;
+    border-radius: 12px;
+    padding: 16px 20px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.06);
+}
+[data-testid="stMetricValue"] { font-size: 1.5rem !important; font-weight: 700; }
+[data-testid="stMetricLabel"] { font-size: .82rem !important; color: #6c757d; font-weight: 500; }
+
+/* ── Buttons ── */
+.stButton > button {
+    border-radius: 20px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    transition: box-shadow .15s, transform .1s;
+    padding: 6px 20px;
+}
+.stButton > button:hover { box-shadow: 0 4px 12px rgba(0,0,0,.15); transform: translateY(-1px); }
+.stButton > button[kind="primary"] { background: #4361ee; border-color: #4361ee; color: white; }
+.stButton > button[kind="primary"]:hover { background: #3550d3; }
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"] { background: #f4f6fa; border-right: 1px solid #e2e6ea; }
+[data-testid="stSidebar"] [data-testid="stHeader"] { color: #2b2d42; font-weight: 700; }
+
+/* ── Tabs ── */
+.stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 2px solid #e2e6ea; }
+.stTabs [data-baseweb="tab"] {
+    border-radius: 8px 8px 0 0;
+    padding: 8px 18px;
+    font-weight: 500;
+    color: #6c757d;
+    background: transparent;
+}
+.stTabs [aria-selected="true"] {
+    background: #4361ee !important;
+    color: white !important;
+    font-weight: 600;
+}
+
+/* ── Dataframe ── */
+[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; border: 1px solid #e2e6ea; }
+
+/* ── Expander ── */
+.streamlit-expanderHeader {
+    font-weight: 600;
+    font-size: .95rem;
+    background: #f8f9fb;
+    border-radius: 8px;
+}
+
+/* ── Forms ── */
+[data-testid="stForm"] {
+    background: #f8f9fb;
+    border-radius: 12px;
+    padding: 16px;
+    border: 1px solid #e2e6ea;
+}
+
+/* ── Section headers ── */
+h2, h3 { color: #2b2d42 !important; }
+h3 { font-size: 1.05rem !important; letter-spacing: .01em; }
+
+/* ── Progress bar ── */
+.stProgress > div > div { background-color: #4361ee; border-radius: 6px; }
+</style>
+""", unsafe_allow_html=True)
+
 # Load all transaction data first, so it's available for the sidebar
 with st.spinner("Loading transaction data..."):
-    all_transactions = load_all_transaction_data()
+    all_transactions = load_all_transaction_data(st.session_state.username)
 
 # Process transaction data if available
 if not all_transactions.empty:
@@ -1004,10 +1074,10 @@ with st.sidebar:
     st.header("Quick Overview")
 
     # Load income and payment data for sidebar display
-    income_data = load_income_data()
-    recurring_payments = load_recurring_payments()
-    monthly_budget = load_monthly_budget()
-    one_time_adjustment = load_one_time_adjustments()
+    income_data = load_income_data(st.session_state.username)
+    recurring_payments = load_recurring_payments(st.session_state.username)
+    monthly_budget = load_monthly_budget(st.session_state.username)
+    one_time_adjustment = load_one_time_adjustments(st.session_state.username)
 
     c1 = st.container(border=True)
     with c1:
@@ -1163,7 +1233,7 @@ with st.sidebar:
 
 # Load all transaction data
 with st.spinner("Loading transaction data..."):
-    all_transactions = load_all_transaction_data()
+    all_transactions = load_all_transaction_data(st.session_state.username)
 
 if all_transactions.empty:
     st.warning("No transaction data found. Please make sure CSV files are available in the user_transactions_data directory.")
@@ -1188,7 +1258,7 @@ else:
 
         # Income data management
         st.subheader("Manage Income Sources")
-        income_data = load_income_data()
+        income_data = load_income_data(st.session_state.username)
 
         # Display current income sources with edit/delete buttons
         if not income_data.empty:
@@ -1253,115 +1323,115 @@ else:
                         # Force a rerun to update the form with these values
                         st.rerun()
 
-        # Income source form
-        st.subheader("Add or Edit Income Source")
+        with st.expander('➕ Add or Edit Income Source', expanded=st.session_state.get('edit_income', False)):
+            # Income source form
 
-        # Initialize session state for the end date checkbox if it doesn't exist
-        if 'end_date_enabled' not in st.session_state:
-            st.session_state.end_date_enabled = False
+            # Initialize session state for the end date checkbox if it doesn't exist
+            if 'end_date_enabled' not in st.session_state:
+                st.session_state.end_date_enabled = False
 
-        # Initialize edit mode flag if it doesn't exist
-        if 'edit_income' not in st.session_state:
-            st.session_state.edit_income = False
+            # Initialize edit mode flag if it doesn't exist
+            if 'edit_income' not in st.session_state:
+                st.session_state.edit_income = False
 
-        # End date checkbox OUTSIDE the form
-        end_month_provided = st.checkbox("This income source has an end date",
-                                         value=st.session_state.end_date_enabled,
-                                         key="end_date_checkbox")
+            # End date checkbox OUTSIDE the form
+            end_month_provided = st.checkbox("This income source has an end date",
+                                             value=st.session_state.end_date_enabled,
+                                             key="end_date_checkbox")
 
-        # Store the checkbox value in session state
-        st.session_state.end_date_enabled = end_month_provided
+            # Store the checkbox value in session state
+            st.session_state.end_date_enabled = end_month_provided
 
-        with st.form("income_form"):
-            # Pre-fill form values if in edit mode
-            person = st.text_input("Person", value=st.session_state.get('edit_person', ''))
-            income_source = st.text_input("Source", value=st.session_state.get('edit_income_source', ''))
-            amount = st.number_input("Amount", min_value=0.0, format="%.2f", value=st.session_state.get('edit_amount', 0.0))
-            frequency = st.selectbox("Frequency", ["Monthly", "Bi-weekly", "Weekly", "Yearly"],
-                                    index=["Monthly", "Bi-weekly", "Weekly", "Yearly"].index(
-                                        st.session_state.get('edit_frequency', "Monthly")
-                                    ))
+            with st.form("income_form"):
+                # Pre-fill form values if in edit mode
+                person = st.text_input("Person", value=st.session_state.get('edit_person', ''))
+                income_source = st.text_input("Source", value=st.session_state.get('edit_income_source', ''))
+                amount = st.number_input("Amount", min_value=0.0, format="%.2f", value=st.session_state.get('edit_amount', 0.0))
+                frequency = st.selectbox("Frequency", ["Monthly", "Bi-weekly", "Weekly", "Yearly"],
+                                        index=["Monthly", "Bi-weekly", "Weekly", "Yearly"].index(
+                                            st.session_state.get('edit_frequency', "Monthly")
+                                        ))
 
-            # Add date field for start month
-            start_month_default = st.session_state.get('edit_start_month', datetime.now().replace(day=1))
-            start_month = st.date_input("Start Month", value=start_month_default)
+                # Add date field for start month
+                start_month_default = st.session_state.get('edit_start_month', datetime.now().replace(day=1))
+                start_month = st.date_input("Start Month", value=start_month_default)
 
-            # Show the end date input field based on the checkbox outside the form
-            end_month = None
-            if end_month_provided:
-                end_month_default = st.session_state.get('edit_end_month', datetime.now().replace(day=1))
-                end_month = st.date_input("End Month", value=end_month_default)
+                # Show the end date input field based on the checkbox outside the form
+                end_month = None
+                if end_month_provided:
+                    end_month_default = st.session_state.get('edit_end_month', datetime.now().replace(day=1))
+                    end_month = st.date_input("End Month", value=end_month_default)
 
-            # Add clear form button
-            clear_income_form = st.form_submit_button("Clear Form")
-            if clear_income_form:
-                st.session_state['edit_person'] = ''
-                st.session_state['edit_income_source'] = ''
-                st.session_state['edit_amount'] = 0.0
-                st.session_state['edit_frequency'] = 'Monthly'
-                st.session_state['edit_start_month'] = datetime.now().replace(day=1)
-                st.session_state['edit_end_month'] = datetime.now().replace(day=1)
-                st.session_state['edit_income'] = False
-                st.rerun()
+                # Add clear form button
+                clear_income_form = st.form_submit_button("Clear Form")
+                if clear_income_form:
+                    st.session_state['edit_person'] = ''
+                    st.session_state['edit_income_source'] = ''
+                    st.session_state['edit_amount'] = 0.0
+                    st.session_state['edit_frequency'] = 'Monthly'
+                    st.session_state['edit_start_month'] = datetime.now().replace(day=1)
+                    st.session_state['edit_end_month'] = datetime.now().replace(day=1)
+                    st.session_state['edit_income'] = False
+                    st.rerun()
 
-            submit_income = st.form_submit_button("Save Income Source")
+                submit_income = st.form_submit_button("Save Income Source")
 
-            if submit_income and person and amount > 0:
-                # If source is not provided, use person name as default
-                if not income_source:
-                    income_source = person
+                if submit_income and person and amount > 0:
+                    # If source is not provided, use person name as default
+                    if not income_source:
+                        income_source = person
 
-                # Convert dates to appropriate format
-                start_month_str = start_month.strftime('%Y-%m-%d') if start_month else None
-                end_month_str = end_month.strftime('%Y-%m-%d') if end_month_provided and end_month else None
+                    # Convert dates to appropriate format
+                    start_month_str = start_month.strftime('%Y-%m-%d') if start_month else None
+                    end_month_str = end_month.strftime('%Y-%m-%d') if end_month_provided and end_month else None
 
-                # Check if we're editing or adding new
-                if st.session_state.get('edit_income', False):
-                    # Update the existing record
-                    mask = income_data['id'] == st.session_state['edit_income_id']
-                    income_data.loc[mask, 'person'] = person
-                    income_data.loc[mask, 'income_source'] = income_source
-                    income_data.loc[mask, 'amount'] = amount
-                    income_data.loc[mask, 'frequency'] = frequency
-                    income_data.loc[mask, 'start_month'] = start_month_str
-                    income_data.loc[mask, 'end_month'] = end_month_str
+                    # Check if we're editing or adding new
+                    if st.session_state.get('edit_income', False):
+                        # Update the existing record
+                        mask = income_data['id'] == st.session_state['edit_income_id']
+                        income_data.loc[mask, 'person'] = person
+                        income_data.loc[mask, 'income_source'] = income_source
+                        income_data.loc[mask, 'amount'] = amount
+                        income_data.loc[mask, 'frequency'] = frequency
+                        income_data.loc[mask, 'start_month'] = start_month_str
+                        income_data.loc[mask, 'end_month'] = end_month_str
 
-                    st.success(f"Updated income source: {income_source} for {person}")
+                        st.success(f"Updated income source: {income_source} for {person}")
 
-                    # Reset edit mode
-                    st.session_state.edit_income = False
-                    st.session_state.pop('edit_income_id', None)
-                    st.session_state.pop('edit_person', None)
-                    st.session_state.pop('edit_income_source', None)
-                    st.session_state.pop('edit_amount', None)
-                    st.session_state.pop('edit_frequency', None)
-                    st.session_state.pop('edit_start_month', None)
-                    st.session_state.pop('edit_end_month', None)
-                else:
-                    # Create new income source entry with a unique ID
-                    new_id = f"income_{len(income_data) + 1}" if not income_data.empty else "income_0"
+                        # Reset edit mode
+                        st.session_state.edit_income = False
+                        st.session_state.pop('edit_income_id', None)
+                        st.session_state.pop('edit_person', None)
+                        st.session_state.pop('edit_income_source', None)
+                        st.session_state.pop('edit_amount', None)
+                        st.session_state.pop('edit_frequency', None)
+                        st.session_state.pop('edit_start_month', None)
+                        st.session_state.pop('edit_end_month', None)
+                    else:
+                        # Create new income source entry with a unique ID
+                        new_id = f"income_{len(income_data) + 1}" if not income_data.empty else "income_0"
 
-                    new_income = pd.DataFrame({
-                        'person': [person],
-                        'income_source': [income_source],
-                        'amount': [amount],
-                        'frequency': [frequency],
-                        'start_month': [start_month_str],
-                        'end_month': [end_month_str],
-                        'id': [new_id]
-                    })
+                        new_income = pd.DataFrame({
+                            'person': [person],
+                            'income_source': [income_source],
+                            'amount': [amount],
+                            'frequency': [frequency],
+                            'start_month': [start_month_str],
+                            'end_month': [end_month_str],
+                            'id': [new_id]
+                        })
 
-                    # Add as a new record
-                    income_data = pd.concat([income_data, new_income], ignore_index=True)
-                    st.success(f"Added new income source: {income_source} for {person}")
+                        # Add as a new record
+                        income_data = pd.concat([income_data, new_income], ignore_index=True)
+                        st.success(f"Added new income source: {income_source} for {person}")
 
-                # Save updated income data
-                save_income_data(income_data)
-                st.rerun()  # Refresh the page to show updated data
+                    # Save updated income data
+                    save_income_data(income_data)
+                    st.rerun()  # Refresh the page to show updated data
 
         # Category management
         with st.expander("Manage Categories"):
-            _mgmt_cats = load_custom_categories()
+            _mgmt_cats = load_custom_categories(st.session_state.username)
 
             col_r, col_b = st.columns(2)
             with col_r:
@@ -1411,7 +1481,7 @@ else:
 
         # Recurring payments management
         st.subheader("Manage Recurring Payments")
-        recurring_payments = load_recurring_payments()
+        recurring_payments = load_recurring_payments(st.session_state.username)
 
         # Display current recurring payments with delete/edit options
         if not recurring_payments.empty:
@@ -1487,160 +1557,160 @@ else:
                         # Force a rerun to update the form with these values
                         st.rerun()
 
-        # Recurring payment form
-        st.subheader("Add or Edit Recurring Payment")
+        with st.expander('➕ Add or Edit Recurring Payment', expanded=st.session_state.get('edit_payment', False)):
+            # Recurring payment form
 
-        # Initialize session state for the payment end date checkbox if it doesn't exist
-        if 'payment_end_date_enabled' not in st.session_state:
-            st.session_state.payment_end_date_enabled = False
+            # Initialize session state for the payment end date checkbox if it doesn't exist
+            if 'payment_end_date_enabled' not in st.session_state:
+                st.session_state.payment_end_date_enabled = False
 
-        # Initialize edit mode flag if it doesn't exist
-        if 'edit_payment' not in st.session_state:
-            st.session_state.edit_payment = False
+            # Initialize edit mode flag if it doesn't exist
+            if 'edit_payment' not in st.session_state:
+                st.session_state.edit_payment = False
 
-        # End date checkbox OUTSIDE the form
-        payment_end_month_provided = st.checkbox("This recurring payment has an end date",
-                                        value=st.session_state.payment_end_date_enabled,
-                                        key="payment_end_date_checkbox")
+            # End date checkbox OUTSIDE the form
+            payment_end_month_provided = st.checkbox("This recurring payment has an end date",
+                                            value=st.session_state.payment_end_date_enabled,
+                                            key="payment_end_date_checkbox")
 
-        # Store the checkbox value in session state
-        st.session_state.payment_end_date_enabled = payment_end_month_provided
+            # Store the checkbox value in session state
+            st.session_state.payment_end_date_enabled = payment_end_month_provided
 
-        with st.form("payment_form"):
-            # Pre-fill form values if in edit mode
-            description = st.text_input("Description", value=st.session_state.get('edit_description', ''))
-            amount = st.number_input("Amount", min_value=0.0, format="%.2f", value=st.session_state.get('edit_amount', 0.0))
+            with st.form("payment_form"):
+                # Pre-fill form values if in edit mode
+                description = st.text_input("Description", value=st.session_state.get('edit_description', ''))
+                amount = st.number_input("Amount", min_value=0.0, format="%.2f", value=st.session_state.get('edit_amount', 0.0))
 
-            frequency_options = ["Monthly", "Bi-weekly", "Weekly", "Yearly", "Quarterly"]
-            frequency = st.selectbox("Frequency", frequency_options,
-                                    index=frequency_options.index(st.session_state.get('edit_frequency', "Monthly"))
-                                    if st.session_state.get('edit_frequency') in frequency_options else 0,
-                                     key=f"frequency_{st.session_state.get('edit_payment_id', 'new')}")
+                frequency_options = ["Monthly", "Bi-weekly", "Weekly", "Yearly", "Quarterly"]
+                frequency = st.selectbox("Frequency", frequency_options,
+                                        index=frequency_options.index(st.session_state.get('edit_frequency', "Monthly"))
+                                        if st.session_state.get('edit_frequency') in frequency_options else 0,
+                                         key=f"frequency_{st.session_state.get('edit_payment_id', 'new')}")
 
-            _custom_cats_rec = load_custom_categories()
-            _all_rec_cats = sorted(set(RECURRING_CATEGORIES_DEFAULT + _custom_cats_rec.get("recurring_categories", [])))
-            _edit_cat_rec = st.session_state.get('edit_category', _all_rec_cats[0])
-            category = st_free_text_select("Category", _all_rec_cats,
-                                    index=_all_rec_cats.index(_edit_cat_rec) if _edit_cat_rec in _all_rec_cats else 0,
-                                    key=f"rec_payment_category_{_edit_cat_rec}")
-            _all_subcats_rec = sorted(set(s for subs in _custom_cats_rec.get("subcategories", {}).values() for s in subs))
-            _edit_subcat_rec = st.session_state.get('edit_sub_category', '')
-            if _all_subcats_rec:
-                sub_category = st_free_text_select("Sub-category", _all_subcats_rec,
-                                    index=_all_subcats_rec.index(_edit_subcat_rec) if _edit_subcat_rec in _all_subcats_rec else 0,
-                                    key=f"rec_payment_subcategory_{_edit_subcat_rec}")
-            else:
-                sub_category = st.text_input("Sub-category", value=_edit_subcat_rec)
-
-            # Add payment type dropdown
-            payment_type = st.selectbox("Payment Type", ["Fixed", "Variable"],
-                                      index=["Fixed", "Variable"].index(st.session_state.get('edit_payment_type', 'Fixed')),
-                                        key=f"payment_type_{st.session_state.get('edit_payment_id', 'new')}")
-
-            # Add clear form button
-            clear_payment_form = st.form_submit_button("Clear Form")
-            if clear_payment_form:
-                st.session_state['edit_description'] = ''
-                st.session_state['edit_amount'] = 0.0
-                st.session_state['edit_frequency'] = 'Monthly'
-                st.session_state['edit_category'] = 'Savings'
-                st.session_state['edit_sub_category'] = ''
-                st.session_state['edit_start_month'] = datetime.now().replace(day=1).date()
-                st.session_state['edit_end_month'] = datetime.now().replace(day=1).date()
-                st.session_state['edit_payment_type'] = 'Fixed'
-                st.session_state['edit_payment'] = False
-                st.rerun()
-
-            # Check if we're in edit mode
-            is_edit_mode = st.session_state.get('edit_payment', False)
-
-            # Get stored date from session state
-            session_date = st.session_state.get('edit_start_month')
-
-            if is_edit_mode and session_date is not None:
-                # Use the stored date when editing
-                start_date_value = session_date
-            else:
-                # Use current month's first day as default for new entries
-                start_date_value = datetime.now().replace(day=1).date()
-
-            # Create the date input with explicit min and max dates
-            min_date = datetime(2020, 1, 1).date()  # Reasonable minimum date
-            max_date = datetime(2030, 12, 31).date()  # Reasonable maximum date
-            payment_start_month = st.date_input(
-                "Start Month",
-                value=start_date_value,
-                min_value=min_date,
-                max_value=max_date,
-                key=f"payment_start_{st.session_state.get('edit_payment_id', 'new')}"  # Unique key for each edit
-            )
-
-            # Show the end date input field based on the checkbox outside the form
-            payment_end_month = None
-            if payment_end_month_provided:
-                end_month_default = st.session_state.get('edit_end_month', datetime.now().replace(day=1) + pd.DateOffset(months=12))
-                payment_end_month = st.date_input("End Month", value=end_month_default, key="payment_end")
-
-            submit_payment = st.form_submit_button("Save Recurring Payment")
-
-            if submit_payment and description and amount > 0:
-                # Convert dates to appropriate format
-                start_month_str = payment_start_month.strftime('%Y-%m-%d') if payment_start_month else None
-                end_month_str = payment_end_month.strftime('%Y-%m-%d') if payment_end_month_provided and payment_end_month else None
-
-                # Check if we're editing or adding new
-                if st.session_state.get('edit_payment', False):
-                    # Update the existing record
-                    mask = recurring_payments['id'] == st.session_state['edit_payment_id']
-                    recurring_payments.loc[mask, 'description'] = description
-                    recurring_payments.loc[mask, 'amount'] = amount
-                    recurring_payments.loc[mask, 'frequency'] = frequency
-                    recurring_payments.loc[mask, 'category'] = category
-                    recurring_payments.loc[mask, 'sub_category'] = sub_category if sub_category else 'General'
-                    recurring_payments.loc[mask, 'start_month'] = start_month_str
-                    recurring_payments.loc[mask, 'end_month'] = end_month_str
-                    recurring_payments.loc[mask, 'payment_type'] = payment_type
-
-                    st.success(f"Updated recurring payment: {description}")
-
-                    # Reset edit mode
-                    st.session_state.edit_payment = False
-                    st.session_state.pop('edit_payment_id', None)
-                    st.session_state.pop('edit_description', None)
-                    st.session_state.pop('edit_amount', None)
-                    st.session_state.pop('edit_frequency', None)
-                    st.session_state.pop('edit_category', None)
-                    st.session_state.pop('edit_sub_category', None)
-                    st.session_state.pop('edit_start_month', None)
-                    st.session_state.pop('edit_end_month', None)
-                    st.session_state.pop('edit_payment_type', None)
+                _custom_cats_rec = load_custom_categories(st.session_state.username)
+                _all_rec_cats = sorted(set(RECURRING_CATEGORIES_DEFAULT + _custom_cats_rec.get("recurring_categories", [])))
+                _edit_cat_rec = st.session_state.get('edit_category', _all_rec_cats[0])
+                category = st_free_text_select("Category", _all_rec_cats,
+                                        index=_all_rec_cats.index(_edit_cat_rec) if _edit_cat_rec in _all_rec_cats else 0,
+                                        key=f"rec_payment_category_{_edit_cat_rec}")
+                _all_subcats_rec = sorted(set(s for subs in _custom_cats_rec.get("subcategories", {}).values() for s in subs))
+                _edit_subcat_rec = st.session_state.get('edit_sub_category', '')
+                if _all_subcats_rec:
+                    sub_category = st_free_text_select("Sub-category", _all_subcats_rec,
+                                        index=_all_subcats_rec.index(_edit_subcat_rec) if _edit_subcat_rec in _all_subcats_rec else 0,
+                                        key=f"rec_payment_subcategory_{_edit_subcat_rec}")
                 else:
-                    # Create new payment with a unique ID
-                    new_id = f"payment_{len(recurring_payments) + 1}" if not recurring_payments.empty else "payment_0"
+                    sub_category = st.text_input("Sub-category", value=_edit_subcat_rec)
 
-                    # Create the new recurring payment
-                    new_payment = pd.DataFrame({
-                        'description': [description],
-                        'amount': [amount],
-                        'frequency': [frequency],
-                        'category': [category],
-                        'sub_category': [sub_category if sub_category else 'General'],
-                        'start_month': [start_month_str],
-                        'end_month': [end_month_str],
-                        'payment_type': [payment_type],
-                        'id': [new_id]
-                    })
+                # Add payment type dropdown
+                payment_type = st.selectbox("Payment Type", ["Fixed", "Variable"],
+                                          index=["Fixed", "Variable"].index(st.session_state.get('edit_payment_type', 'Fixed')),
+                                            key=f"payment_type_{st.session_state.get('edit_payment_id', 'new')}")
 
-                    # Add as a new record
-                    recurring_payments = pd.concat([recurring_payments, new_payment], ignore_index=True)
-                    st.success(f"Added new recurring payment: {description}")
+                # Add clear form button
+                clear_payment_form = st.form_submit_button("Clear Form")
+                if clear_payment_form:
+                    st.session_state['edit_description'] = ''
+                    st.session_state['edit_amount'] = 0.0
+                    st.session_state['edit_frequency'] = 'Monthly'
+                    st.session_state['edit_category'] = 'Savings'
+                    st.session_state['edit_sub_category'] = ''
+                    st.session_state['edit_start_month'] = datetime.now().replace(day=1).date()
+                    st.session_state['edit_end_month'] = datetime.now().replace(day=1).date()
+                    st.session_state['edit_payment_type'] = 'Fixed'
+                    st.session_state['edit_payment'] = False
+                    st.rerun()
 
-                # Save updated recurring payments data
-                save_recurring_payments(recurring_payments)
-                st.rerun()  # Refresh the page to show updated data
+                # Check if we're in edit mode
+                is_edit_mode = st.session_state.get('edit_payment', False)
+
+                # Get stored date from session state
+                session_date = st.session_state.get('edit_start_month')
+
+                if is_edit_mode and session_date is not None:
+                    # Use the stored date when editing
+                    start_date_value = session_date
+                else:
+                    # Use current month's first day as default for new entries
+                    start_date_value = datetime.now().replace(day=1).date()
+
+                # Create the date input with explicit min and max dates
+                min_date = datetime(2020, 1, 1).date()  # Reasonable minimum date
+                max_date = datetime(2030, 12, 31).date()  # Reasonable maximum date
+                payment_start_month = st.date_input(
+                    "Start Month",
+                    value=start_date_value,
+                    min_value=min_date,
+                    max_value=max_date,
+                    key=f"payment_start_{st.session_state.get('edit_payment_id', 'new')}"  # Unique key for each edit
+                )
+
+                # Show the end date input field based on the checkbox outside the form
+                payment_end_month = None
+                if payment_end_month_provided:
+                    end_month_default = st.session_state.get('edit_end_month', datetime.now().replace(day=1) + pd.DateOffset(months=12))
+                    payment_end_month = st.date_input("End Month", value=end_month_default, key="payment_end")
+
+                submit_payment = st.form_submit_button("Save Recurring Payment")
+
+                if submit_payment and description and amount > 0:
+                    # Convert dates to appropriate format
+                    start_month_str = payment_start_month.strftime('%Y-%m-%d') if payment_start_month else None
+                    end_month_str = payment_end_month.strftime('%Y-%m-%d') if payment_end_month_provided and payment_end_month else None
+
+                    # Check if we're editing or adding new
+                    if st.session_state.get('edit_payment', False):
+                        # Update the existing record
+                        mask = recurring_payments['id'] == st.session_state['edit_payment_id']
+                        recurring_payments.loc[mask, 'description'] = description
+                        recurring_payments.loc[mask, 'amount'] = amount
+                        recurring_payments.loc[mask, 'frequency'] = frequency
+                        recurring_payments.loc[mask, 'category'] = category
+                        recurring_payments.loc[mask, 'sub_category'] = sub_category if sub_category else 'General'
+                        recurring_payments.loc[mask, 'start_month'] = start_month_str
+                        recurring_payments.loc[mask, 'end_month'] = end_month_str
+                        recurring_payments.loc[mask, 'payment_type'] = payment_type
+
+                        st.success(f"Updated recurring payment: {description}")
+
+                        # Reset edit mode
+                        st.session_state.edit_payment = False
+                        st.session_state.pop('edit_payment_id', None)
+                        st.session_state.pop('edit_description', None)
+                        st.session_state.pop('edit_amount', None)
+                        st.session_state.pop('edit_frequency', None)
+                        st.session_state.pop('edit_category', None)
+                        st.session_state.pop('edit_sub_category', None)
+                        st.session_state.pop('edit_start_month', None)
+                        st.session_state.pop('edit_end_month', None)
+                        st.session_state.pop('edit_payment_type', None)
+                    else:
+                        # Create new payment with a unique ID
+                        new_id = f"payment_{len(recurring_payments) + 1}" if not recurring_payments.empty else "payment_0"
+
+                        # Create the new recurring payment
+                        new_payment = pd.DataFrame({
+                            'description': [description],
+                            'amount': [amount],
+                            'frequency': [frequency],
+                            'category': [category],
+                            'sub_category': [sub_category if sub_category else 'General'],
+                            'start_month': [start_month_str],
+                            'end_month': [end_month_str],
+                            'payment_type': [payment_type],
+                            'id': [new_id]
+                        })
+
+                        # Add as a new record
+                        recurring_payments = pd.concat([recurring_payments, new_payment], ignore_index=True)
+                        st.success(f"Added new recurring payment: {description}")
+
+                    # Save updated recurring payments data
+                    save_recurring_payments(recurring_payments)
+                    st.rerun()  # Refresh the page to show updated data
         # ------------------ Monthly Budget Management (new section) ------------------
         st.subheader("Monthly Budget")
-        monthly_budget_df = load_monthly_budget()
+        monthly_budget_df = load_monthly_budget(st.session_state.username)
 
         if not monthly_budget_df.empty:
             st.write("### Current Monthly Budget Items")
@@ -1678,117 +1748,118 @@ else:
         else:
             st.info("No budget items defined yet.")
 
-        # Initialize session state flags
-        if 'edit_budget' not in st.session_state:
-            st.session_state.edit_budget = False
-        if 'budget_end_date_enabled' not in st.session_state:
-            st.session_state.budget_end_date_enabled = False
-
-        budget_end_month_toggle = st.checkbox("This budget item has an end date", value=st.session_state.budget_end_date_enabled, key="budget_end_date_checkbox")
-        st.session_state.budget_end_date_enabled = budget_end_month_toggle
-
-        with st.form("monthly_budget_form"):
-            description_b = st.text_input("Description", value=st.session_state.get('edit_budget_description',''))
-            amount_b = st.number_input("Amount", min_value=0.0, format='%.2f', value=float(st.session_state.get('edit_budget_amount', 0.0)), key=f"budget_amount_{st.session_state.get('edit_budget_id', 'new')}")
-            freq_opts = ["Monthly","Bi-weekly","Weekly","Yearly","Quarterly"]
-            frequency_b = st.selectbox("Frequency", freq_opts, index=freq_opts.index(st.session_state.get('edit_budget_frequency','Monthly')) if st.session_state.get('edit_budget_frequency','Monthly') in freq_opts else 0,
-                                       key=f"budget_frequency_{st.session_state.get('edit_budget_id', 'new')}")
-            _custom_cats_bud = load_custom_categories()
-            _all_bud_cats = sorted(set(BUDGET_CATEGORIES_DEFAULT + _custom_cats_bud.get("budget_categories", [])))
-            _edit_cat_bud = st.session_state.get('edit_budget_category', _all_bud_cats[0])
-            category_b = st_free_text_select("Category", _all_bud_cats,
-                                           index=_all_bud_cats.index(_edit_cat_bud) if _edit_cat_bud in _all_bud_cats else 0,
-                                           key=f"budget_category_{_edit_cat_bud}")
-            _all_subcats_bud = sorted(set(s for subs in _custom_cats_bud.get("subcategories", {}).values() for s in subs))
-            _edit_subcat_bud = st.session_state.get('edit_budget_sub_category', '')
-            if _all_subcats_bud:
-                sub_category_b = st_free_text_select("Sub-category", _all_subcats_bud,
-                                    index=_all_subcats_bud.index(_edit_subcat_bud) if _edit_subcat_bud in _all_subcats_bud else 0,
-                                    key=f"budget_subcategory_{_edit_subcat_bud}")
-            else:
-                sub_category_b = st.text_input("Sub-category", value=_edit_subcat_bud)
-            payment_type_b = st.selectbox("Payment Type", ["Fixed","Variable"], index=["Fixed","Variable"].index(st.session_state.get('edit_budget_payment_type','Fixed')),
-                                          key=f"budget_payment_type_{st.session_state.get('edit_budget_id', 'new')}")
-            # Dates
-            start_default_b = st.session_state.get('edit_budget_start_month', datetime.now().replace(day=1).date())
-            start_month_b = st.date_input("Start Month", value=start_default_b,
-                                          key=f"budget_start_{st.session_state.get('edit_budget_id', 'new')}" )
-            end_month_b = None
-            if budget_end_month_toggle:
-                end_default_b = st.session_state.get('edit_budget_end_month', datetime.now().replace(day=1).date())
-                end_month_b = st.date_input("End Month", value=end_default_b, key=f"budget_end_{st.session_state.get('edit_budget_id', 'new')}")
-            clear_budget = st.form_submit_button("Clear Form")
-            if clear_budget:
-                for k in ['edit_budget','edit_budget_id','edit_budget_description','edit_budget_amount','edit_budget_frequency','edit_budget_category','edit_budget_sub_category','edit_budget_payment_type','edit_budget_start_month','edit_budget_end_month']:
-                    if k in st.session_state:
-                        st.session_state.pop(k)
-                keys_tuple = tuple([
-                    'budget_description', 'budget_amount', 'budget_frequency', 'budget_category',
-                    'budget_sub_category', 'budget_payment_type', 'budget_start_month', 'budget_end_month',
-                    'budget_end_date_enabled'
-                ])
-                keys_to_delete = [key for key in st.session_state.keys() if key.startswith(keys_tuple)]
-                st.write("keys_to_delete", keys_to_delete)
-                for k in keys_to_delete:
-                    st.session_state.pop(k, None)
+        with st.expander('➕ Add or Edit Budget Item', expanded=st.session_state.get('edit_budget', False)):
+            # Initialize session state flags
+            if 'edit_budget' not in st.session_state:
+                st.session_state.edit_budget = False
+            if 'budget_end_date_enabled' not in st.session_state:
                 st.session_state.budget_end_date_enabled = False
-                st.write("key: ", st.session_state.get('budget_amount_new', 0.0))
-                st.rerun()
-            submit_budget = st.form_submit_button("Save Budget Item")
-            if submit_budget and description_b and amount_b > 0:
-                st.write("in here")
-                start_str_b = start_month_b.strftime('%Y-%m-%d') if start_month_b else None
-                end_str_b = end_month_b.strftime('%Y-%m-%d') if budget_end_month_toggle and end_month_b else None
-                if st.session_state.get('edit_budget', False):
-                    mask = monthly_budget_df['id'] == st.session_state.edit_budget_id
-                    monthly_budget_df.loc[mask,'description'] = description_b
-                    monthly_budget_df.loc[mask,'amount'] = amount_b
-                    monthly_budget_df.loc[mask,'frequency'] = frequency_b
-                    monthly_budget_df.loc[mask,'category'] = category_b
-                    monthly_budget_df.loc[mask,'sub_category'] = sub_category_b if sub_category_b else 'General'
-                    monthly_budget_df.loc[mask,'start_month'] = start_str_b
-                    monthly_budget_df.loc[mask,'end_month'] = end_str_b
-                    monthly_budget_df.loc[mask,'payment_type'] = payment_type_b
-                    st.success(f"Updated budget item: {description_b}")
-                    # reset
+
+            budget_end_month_toggle = st.checkbox("This budget item has an end date", value=st.session_state.budget_end_date_enabled, key="budget_end_date_checkbox")
+            st.session_state.budget_end_date_enabled = budget_end_month_toggle
+
+            with st.form("monthly_budget_form"):
+                description_b = st.text_input("Description", value=st.session_state.get('edit_budget_description',''))
+                amount_b = st.number_input("Amount", min_value=0.0, format='%.2f', value=float(st.session_state.get('edit_budget_amount', 0.0)), key=f"budget_amount_{st.session_state.get('edit_budget_id', 'new')}")
+                freq_opts = ["Monthly","Bi-weekly","Weekly","Yearly","Quarterly"]
+                frequency_b = st.selectbox("Frequency", freq_opts, index=freq_opts.index(st.session_state.get('edit_budget_frequency','Monthly')) if st.session_state.get('edit_budget_frequency','Monthly') in freq_opts else 0,
+                                           key=f"budget_frequency_{st.session_state.get('edit_budget_id', 'new')}")
+                _custom_cats_bud = load_custom_categories(st.session_state.username)
+                _all_bud_cats = sorted(set(BUDGET_CATEGORIES_DEFAULT + _custom_cats_bud.get("budget_categories", [])))
+                _edit_cat_bud = st.session_state.get('edit_budget_category', _all_bud_cats[0])
+                category_b = st_free_text_select("Category", _all_bud_cats,
+                                               index=_all_bud_cats.index(_edit_cat_bud) if _edit_cat_bud in _all_bud_cats else 0,
+                                               key=f"budget_category_{_edit_cat_bud}")
+                _all_subcats_bud = sorted(set(s for subs in _custom_cats_bud.get("subcategories", {}).values() for s in subs))
+                _edit_subcat_bud = st.session_state.get('edit_budget_sub_category', '')
+                if _all_subcats_bud:
+                    sub_category_b = st_free_text_select("Sub-category", _all_subcats_bud,
+                                        index=_all_subcats_bud.index(_edit_subcat_bud) if _edit_subcat_bud in _all_subcats_bud else 0,
+                                        key=f"budget_subcategory_{_edit_subcat_bud}")
+                else:
+                    sub_category_b = st.text_input("Sub-category", value=_edit_subcat_bud)
+                payment_type_b = st.selectbox("Payment Type", ["Fixed","Variable"], index=["Fixed","Variable"].index(st.session_state.get('edit_budget_payment_type','Fixed')),
+                                              key=f"budget_payment_type_{st.session_state.get('edit_budget_id', 'new')}")
+                # Dates
+                start_default_b = st.session_state.get('edit_budget_start_month', datetime.now().replace(day=1).date())
+                start_month_b = st.date_input("Start Month", value=start_default_b,
+                                              key=f"budget_start_{st.session_state.get('edit_budget_id', 'new')}" )
+                end_month_b = None
+                if budget_end_month_toggle:
+                    end_default_b = st.session_state.get('edit_budget_end_month', datetime.now().replace(day=1).date())
+                    end_month_b = st.date_input("End Month", value=end_default_b, key=f"budget_end_{st.session_state.get('edit_budget_id', 'new')}")
+                clear_budget = st.form_submit_button("Clear Form")
+                if clear_budget:
                     for k in ['edit_budget','edit_budget_id','edit_budget_description','edit_budget_amount','edit_budget_frequency','edit_budget_category','edit_budget_sub_category','edit_budget_payment_type','edit_budget_start_month','edit_budget_end_month']:
                         if k in st.session_state:
                             st.session_state.pop(k)
-                else:
-                    new_id_b = f"budget_{len(monthly_budget_df)+1}" if not monthly_budget_df.empty else "budget_0"
-                    new_row_b = pd.DataFrame({
-                        'description':[description_b],
-                        'amount':[amount_b],
-                        'frequency':[frequency_b],
-                        'category':[category_b],
-                        'sub_category':[sub_category_b if sub_category_b else 'General'],
-                        'start_month':[start_str_b],
-                        'end_month':[end_str_b],
-                        'payment_type':[payment_type_b],
-                        'id':[new_id_b]
-                    })
-                    monthly_budget_df = pd.concat([monthly_budget_df, new_row_b], ignore_index=True)
-                    st.success(f"Added new budget item: {description_b}")
                     keys_tuple = tuple([
                         'budget_description', 'budget_amount', 'budget_frequency', 'budget_category',
                         'budget_sub_category', 'budget_payment_type', 'budget_start_month', 'budget_end_month',
                         'budget_end_date_enabled'
                     ])
-                    for k in [key for key in st.session_state.keys() if key.startswith(keys_tuple)]:
+                    keys_to_delete = [key for key in st.session_state.keys() if key.startswith(keys_tuple)]
+                    st.write("keys_to_delete", keys_to_delete)
+                    for k in keys_to_delete:
                         st.session_state.pop(k, None)
-                    # Edit prefill keys (safe to remove if present)
-                    for k in [
-                        'edit_budget', 'edit_budget_id', 'edit_budget_description', 'edit_budget_amount',
-                        'edit_budget_frequency', 'edit_budget_category', 'edit_budget_sub_category',
-                        'edit_budget_payment_type', 'edit_budget_start_month', 'edit_budget_end_month'
-                    ]:
-                        st.session_state.pop(k, None)
-                save_monthly_budget(monthly_budget_df)
-                st.rerun()
+                    st.session_state.budget_end_date_enabled = False
+                    st.write("key: ", st.session_state.get('budget_amount_new', 0.0))
+                    st.rerun()
+                submit_budget = st.form_submit_button("Save Budget Item")
+                if submit_budget and description_b and amount_b > 0:
+                    st.write("in here")
+                    start_str_b = start_month_b.strftime('%Y-%m-%d') if start_month_b else None
+                    end_str_b = end_month_b.strftime('%Y-%m-%d') if budget_end_month_toggle and end_month_b else None
+                    if st.session_state.get('edit_budget', False):
+                        mask = monthly_budget_df['id'] == st.session_state.edit_budget_id
+                        monthly_budget_df.loc[mask,'description'] = description_b
+                        monthly_budget_df.loc[mask,'amount'] = amount_b
+                        monthly_budget_df.loc[mask,'frequency'] = frequency_b
+                        monthly_budget_df.loc[mask,'category'] = category_b
+                        monthly_budget_df.loc[mask,'sub_category'] = sub_category_b if sub_category_b else 'General'
+                        monthly_budget_df.loc[mask,'start_month'] = start_str_b
+                        monthly_budget_df.loc[mask,'end_month'] = end_str_b
+                        monthly_budget_df.loc[mask,'payment_type'] = payment_type_b
+                        st.success(f"Updated budget item: {description_b}")
+                        # reset
+                        for k in ['edit_budget','edit_budget_id','edit_budget_description','edit_budget_amount','edit_budget_frequency','edit_budget_category','edit_budget_sub_category','edit_budget_payment_type','edit_budget_start_month','edit_budget_end_month']:
+                            if k in st.session_state:
+                                st.session_state.pop(k)
+                    else:
+                        new_id_b = f"budget_{len(monthly_budget_df)+1}" if not monthly_budget_df.empty else "budget_0"
+                        new_row_b = pd.DataFrame({
+                            'description':[description_b],
+                            'amount':[amount_b],
+                            'frequency':[frequency_b],
+                            'category':[category_b],
+                            'sub_category':[sub_category_b if sub_category_b else 'General'],
+                            'start_month':[start_str_b],
+                            'end_month':[end_str_b],
+                            'payment_type':[payment_type_b],
+                            'id':[new_id_b]
+                        })
+                        monthly_budget_df = pd.concat([monthly_budget_df, new_row_b], ignore_index=True)
+                        st.success(f"Added new budget item: {description_b}")
+                        keys_tuple = tuple([
+                            'budget_description', 'budget_amount', 'budget_frequency', 'budget_category',
+                            'budget_sub_category', 'budget_payment_type', 'budget_start_month', 'budget_end_month',
+                            'budget_end_date_enabled'
+                        ])
+                        for k in [key for key in st.session_state.keys() if key.startswith(keys_tuple)]:
+                            st.session_state.pop(k, None)
+                        # Edit prefill keys (safe to remove if present)
+                        for k in [
+                            'edit_budget', 'edit_budget_id', 'edit_budget_description', 'edit_budget_amount',
+                            'edit_budget_frequency', 'edit_budget_category', 'edit_budget_sub_category',
+                            'edit_budget_payment_type', 'edit_budget_start_month', 'edit_budget_end_month'
+                        ]:
+                            st.session_state.pop(k, None)
+                    save_monthly_budget(monthly_budget_df)
+                    st.rerun()
 
         # ------------------ One time Adjustments Management (new section) ------------------
         st.subheader("One time Adjustments")
-        one_time_adj_df = load_one_time_adjustments()
+        one_time_adj_df = load_one_time_adjustments(st.session_state.username)
 
         if not one_time_adj_df.empty:
             st.write("### One time adjustments Items")
@@ -1833,110 +1904,111 @@ else:
         else:
             st.info("No one time adjustment items defined yet.")
 
-        # Initialize session state flags
-        if 'edit_one_time_adj' not in st.session_state:
-            st.session_state.edit_one_time_adj = False
-        if 'one_time_adj_end_date_enabled' not in st.session_state:
-            st.session_state.one_time_adj_end_date_enabled = False
-
-        one_time_adj_end_month_toggle = st.checkbox("This one time adjustment item has an end date",
-                                              value=st.session_state.one_time_adj_end_date_enabled,
-                                              key="one_time_adj_end_date_checkbox")
-        st.session_state.one_time_adj_end_date_enabled = one_time_adj_end_month_toggle
-
-        with st.form("monthly_one_time_adj_form"):
-            description_ot = st.text_input("Description",
-                                          value=st.session_state.get('edit_one_time_adj_description', ''))
-            amount_ot = st.number_input("Amount", min_value=0.0, format='%.2f',
-                                       value=float(st.session_state.get('edit_one_time_adj_amount', 0.0)),
-                                       key=f"one_time_adj_amount_{st.session_state.get('edit_one_time_adj_id', 'new')}")
-            freq_opts = ["One-Time", "Monthly", "Bi-weekly", "Weekly", "Yearly", "Quarterly"]
-            frequency_ot = st.selectbox("Frequency", freq_opts, index=freq_opts.index(
-                st.session_state.get('edit_one_time_adj_frequency', 'Monthly')) if st.session_state.get(
-                'edit_one_time_adj_frequency', 'One-Time') in freq_opts else 0,
-                                       key=f"one_time_adj_frequency_{st.session_state.get('edit_one_time_adj_id', 'new')}")
-            category_ot = st.text_input("Category", value=st.session_state.get('edit_one_time_adj_category', ''))
-            sub_category_ot = st.text_input("Sub-category",
-                                           value=st.session_state.get('edit_one_time_adj_sub_category', ''))
-            # Dates
-            start_default_ot = st.session_state.get('edit_one_time_adj_start_month',
-                                                   datetime.now().replace(day=1).date())
-            start_month_ot = st.date_input("Start Month", value=start_default_ot,
-                                          key=f"one_time_adj_start_{st.session_state.get('edit_one_time_adj_id', 'new')}")
-            end_month_ot = None
-            if one_time_adj_end_month_toggle:
-                end_default_ot = st.session_state.get('edit_one_time_adj_end_month',
-                                                     datetime.now().replace(day=1).date())
-                end_month_ot = st.date_input("End Month", value=end_default_ot,
-                                            key=f"one_time_adj_end_{st.session_state.get('edit_one_time_adj_id', 'new')}")
-            clear_one_time_adj = st.form_submit_button("Clear Form")
-            if clear_one_time_adj:
-                for k in ['edit_one_time_adj', 'edit_one_time_adj_id', 'edit_one_time_adj_description', 'edit_one_time_adj_amount',
-                          'edit_one_time_adj_frequency', 'edit_one_time_adj_category', 'edit_one_time_adj_sub_category',
-                          'edit_one_time_adj_payment_type', 'edit_one_time_adj_start_month', 'edit_one_time_adj_end_month']:
-                    if k in st.session_state:
-                        st.session_state.pop(k)
-                keys_tuple_ot = tuple([
-                    'one_time_adj_description', 'one_time_adj_amount', 'one_time_adj_frequency', 'one_time_adj_category',
-                    'one_time_adj_sub_category', 'one_time_adj_start_month', 'one_time_adj_end_month',
-                    'one_time_adj_end_date_enabled'
-                ])
-                keys_to_delete_ot = [key for key in st.session_state.keys() if key.startswith(keys_tuple_ot)]
-                for k in keys_to_delete_ot:
-                    st.session_state.pop(k, None)
+        with st.expander('➕ Add or Edit One-Time Adjustment', expanded=st.session_state.get('edit_one_time_adj', False)):
+            # Initialize session state flags
+            if 'edit_one_time_adj' not in st.session_state:
+                st.session_state.edit_one_time_adj = False
+            if 'one_time_adj_end_date_enabled' not in st.session_state:
                 st.session_state.one_time_adj_end_date_enabled = False
-                st.rerun()
-            submit_one_time_adj = st.form_submit_button("Save One Time Adjustment Item")
-            if submit_one_time_adj and description_ot and amount_ot > 0:
-                start_str_ot = start_month_ot.strftime('%Y-%m-%d') if start_month_ot else None
-                end_str_ot = end_month_ot.strftime(
-                    '%Y-%m-%d') if one_time_adj_end_month_toggle and end_month_ot else None
-                if st.session_state.get('edit_one_time_adj', False):
-                    mask = one_time_adj_df['id'] == st.session_state.edit_one_time_adj_id
-                    one_time_adj_df.loc[mask, 'description'] = description_ot
-                    one_time_adj_df.loc[mask, 'amount'] = amount_ot
-                    one_time_adj_df.loc[mask, 'frequency'] = frequency_ot
-                    one_time_adj_df.loc[mask, 'category'] = category_ot
-                    one_time_adj_df.loc[mask, 'sub_category'] = sub_category_ot if sub_category_ot else 'General'
-                    one_time_adj_df.loc[mask, 'start_month'] = start_str_ot
-                    one_time_adj_df.loc[mask, 'end_month'] = end_str_ot
-                    st.success(f"Updated One Time Adjustment item: {description_ot}")
-                    # reset
+
+            one_time_adj_end_month_toggle = st.checkbox("This one time adjustment item has an end date",
+                                                  value=st.session_state.one_time_adj_end_date_enabled,
+                                                  key="one_time_adj_end_date_checkbox")
+            st.session_state.one_time_adj_end_date_enabled = one_time_adj_end_month_toggle
+
+            with st.form("monthly_one_time_adj_form"):
+                description_ot = st.text_input("Description",
+                                              value=st.session_state.get('edit_one_time_adj_description', ''))
+                amount_ot = st.number_input("Amount", min_value=0.0, format='%.2f',
+                                           value=float(st.session_state.get('edit_one_time_adj_amount', 0.0)),
+                                           key=f"one_time_adj_amount_{st.session_state.get('edit_one_time_adj_id', 'new')}")
+                freq_opts = ["One-Time", "Monthly", "Bi-weekly", "Weekly", "Yearly", "Quarterly"]
+                frequency_ot = st.selectbox("Frequency", freq_opts, index=freq_opts.index(
+                    st.session_state.get('edit_one_time_adj_frequency', 'Monthly')) if st.session_state.get(
+                    'edit_one_time_adj_frequency', 'One-Time') in freq_opts else 0,
+                                           key=f"one_time_adj_frequency_{st.session_state.get('edit_one_time_adj_id', 'new')}")
+                category_ot = st.text_input("Category", value=st.session_state.get('edit_one_time_adj_category', ''))
+                sub_category_ot = st.text_input("Sub-category",
+                                               value=st.session_state.get('edit_one_time_adj_sub_category', ''))
+                # Dates
+                start_default_ot = st.session_state.get('edit_one_time_adj_start_month',
+                                                       datetime.now().replace(day=1).date())
+                start_month_ot = st.date_input("Start Month", value=start_default_ot,
+                                              key=f"one_time_adj_start_{st.session_state.get('edit_one_time_adj_id', 'new')}")
+                end_month_ot = None
+                if one_time_adj_end_month_toggle:
+                    end_default_ot = st.session_state.get('edit_one_time_adj_end_month',
+                                                         datetime.now().replace(day=1).date())
+                    end_month_ot = st.date_input("End Month", value=end_default_ot,
+                                                key=f"one_time_adj_end_{st.session_state.get('edit_one_time_adj_id', 'new')}")
+                clear_one_time_adj = st.form_submit_button("Clear Form")
+                if clear_one_time_adj:
                     for k in ['edit_one_time_adj', 'edit_one_time_adj_id', 'edit_one_time_adj_description', 'edit_one_time_adj_amount',
                               'edit_one_time_adj_frequency', 'edit_one_time_adj_category', 'edit_one_time_adj_sub_category',
                               'edit_one_time_adj_payment_type', 'edit_one_time_adj_start_month', 'edit_one_time_adj_end_month']:
                         if k in st.session_state:
                             st.session_state.pop(k)
-                else:
-                    new_id_ot = f"one_time_adj_{len(one_time_adj_df) + 1}" if not one_time_adj_df.empty else "one_time_adj_0"
-                    new_row_ot = pd.DataFrame({
-                        'description': [description_ot],
-                        'amount': [amount_ot],
-                        'frequency': [frequency_ot],
-                        'category': [category_ot],
-                        'sub_category': [sub_category_ot if sub_category_ot else 'General'],
-                        'start_month': [start_str_ot],
-                        'end_month': [end_str_ot],
-                        'id': [new_id_ot]
-                    })
-                    one_time_adj_df = pd.concat([one_time_adj_df, new_row_ot], ignore_index=True)
-                    st.success(f"Added new one time adjustment item: {description_ot}")
                     keys_tuple_ot = tuple([
                         'one_time_adj_description', 'one_time_adj_amount', 'one_time_adj_frequency', 'one_time_adj_category',
-                        'one_time_adj_sub_category', 'one_time_adj_payment_type', 'one_time_adj_start_month', 'one_time_adj_end_month',
+                        'one_time_adj_sub_category', 'one_time_adj_start_month', 'one_time_adj_end_month',
                         'one_time_adj_end_date_enabled'
                     ])
-                    for k in [key for key in st.session_state.keys() if key.startswith(keys_tuple_ot)]:
+                    keys_to_delete_ot = [key for key in st.session_state.keys() if key.startswith(keys_tuple_ot)]
+                    for k in keys_to_delete_ot:
                         st.session_state.pop(k, None)
-                    # Edit prefill keys (safe to remove if present)
-                    for k in [
-                        'edit_one_time_adj', 'edit_one_time_adj_id', 'edit_one_time_adj_description', 'edit_one_time_adj_amount',
-                        'edit_one_time_adj_frequency', 'edit_one_time_adj_category', 'edit_one_time_adj_sub_category',
-                        'edit_one_time_adj_payment_type', 'edit_one_time_adj_start_month', 'edit_one_time_adj_end_month'
-                    ]:
-                        st.session_state.pop(k, None)
-                save_one_time_adj(one_time_adj_df)
-                st.rerun()
+                    st.session_state.one_time_adj_end_date_enabled = False
+                    st.rerun()
+                submit_one_time_adj = st.form_submit_button("Save One Time Adjustment Item")
+                if submit_one_time_adj and description_ot and amount_ot > 0:
+                    start_str_ot = start_month_ot.strftime('%Y-%m-%d') if start_month_ot else None
+                    end_str_ot = end_month_ot.strftime(
+                        '%Y-%m-%d') if one_time_adj_end_month_toggle and end_month_ot else None
+                    if st.session_state.get('edit_one_time_adj', False):
+                        mask = one_time_adj_df['id'] == st.session_state.edit_one_time_adj_id
+                        one_time_adj_df.loc[mask, 'description'] = description_ot
+                        one_time_adj_df.loc[mask, 'amount'] = amount_ot
+                        one_time_adj_df.loc[mask, 'frequency'] = frequency_ot
+                        one_time_adj_df.loc[mask, 'category'] = category_ot
+                        one_time_adj_df.loc[mask, 'sub_category'] = sub_category_ot if sub_category_ot else 'General'
+                        one_time_adj_df.loc[mask, 'start_month'] = start_str_ot
+                        one_time_adj_df.loc[mask, 'end_month'] = end_str_ot
+                        st.success(f"Updated One Time Adjustment item: {description_ot}")
+                        # reset
+                        for k in ['edit_one_time_adj', 'edit_one_time_adj_id', 'edit_one_time_adj_description', 'edit_one_time_adj_amount',
+                                  'edit_one_time_adj_frequency', 'edit_one_time_adj_category', 'edit_one_time_adj_sub_category',
+                                  'edit_one_time_adj_payment_type', 'edit_one_time_adj_start_month', 'edit_one_time_adj_end_month']:
+                            if k in st.session_state:
+                                st.session_state.pop(k)
+                    else:
+                        new_id_ot = f"one_time_adj_{len(one_time_adj_df) + 1}" if not one_time_adj_df.empty else "one_time_adj_0"
+                        new_row_ot = pd.DataFrame({
+                            'description': [description_ot],
+                            'amount': [amount_ot],
+                            'frequency': [frequency_ot],
+                            'category': [category_ot],
+                            'sub_category': [sub_category_ot if sub_category_ot else 'General'],
+                            'start_month': [start_str_ot],
+                            'end_month': [end_str_ot],
+                            'id': [new_id_ot]
+                        })
+                        one_time_adj_df = pd.concat([one_time_adj_df, new_row_ot], ignore_index=True)
+                        st.success(f"Added new one time adjustment item: {description_ot}")
+                        keys_tuple_ot = tuple([
+                            'one_time_adj_description', 'one_time_adj_amount', 'one_time_adj_frequency', 'one_time_adj_category',
+                            'one_time_adj_sub_category', 'one_time_adj_payment_type', 'one_time_adj_start_month', 'one_time_adj_end_month',
+                            'one_time_adj_end_date_enabled'
+                        ])
+                        for k in [key for key in st.session_state.keys() if key.startswith(keys_tuple_ot)]:
+                            st.session_state.pop(k, None)
+                        # Edit prefill keys (safe to remove if present)
+                        for k in [
+                            'edit_one_time_adj', 'edit_one_time_adj_id', 'edit_one_time_adj_description', 'edit_one_time_adj_amount',
+                            'edit_one_time_adj_frequency', 'edit_one_time_adj_category', 'edit_one_time_adj_sub_category',
+                            'edit_one_time_adj_payment_type', 'edit_one_time_adj_start_month', 'edit_one_time_adj_end_month'
+                        ]:
+                            st.session_state.pop(k, None)
+                    save_one_time_adj(one_time_adj_df)
+                    st.rerun()
 
     with tab2:
         st.header("Financial Overview")
