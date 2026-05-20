@@ -35,6 +35,7 @@ import calendar
 from PIL import Image
 import numpy as np
 import re
+import json
 from io import StringIO
 
 # Set page configuration
@@ -704,6 +705,37 @@ def save_recurring_payments(df):
         payments_file = os.path.join('user_transactions_data', 'recurring_payments.csv')
         save_df.to_csv(payments_file, index=False)
 
+RECURRING_CATEGORIES_DEFAULT = ["Day care", "India", "Loan", "Mortgage", "Savings", "Utilities"]
+BUDGET_CATEGORIES_DEFAULT = ["Day care", "Dining", "Entertainment", "Healthcare", "India", "Loan", "Rent", "Shopping", "Transportation", "Utilities"]
+
+
+def load_custom_categories():
+    if 'custom_categories_cache' in st.session_state:
+        return st.session_state.custom_categories_cache
+    username = st.session_state.username
+    try:
+        file_content = read_file_from_s3(username, 'custom_categories.json')
+        if file_content is not None:
+            data = json.loads(file_content)
+            st.session_state.custom_categories_cache = data
+            return data
+    except Exception:
+        pass
+    default = {"recurring_categories": [], "budget_categories": [], "subcategories": {"Day care": ["Day care"]}}
+    st.session_state.custom_categories_cache = default
+    return default
+
+
+def save_custom_categories(data):
+    username = st.session_state.username
+    st.session_state.custom_categories_cache = data
+    try:
+        from s3_utils import write_file_to_s3
+        write_file_to_s3(username, 'custom_categories.json', json.dumps(data, indent=2))
+    except Exception as e:
+        print(f"Error saving custom categories: {str(e)}")
+
+
 # Calculate monthly income based on frequency
 def calculate_monthly_income(amount, frequency):
     if frequency == 'Monthly':
@@ -1327,6 +1359,56 @@ else:
                 save_income_data(income_data)
                 st.rerun()  # Refresh the page to show updated data
 
+        # Category management
+        with st.expander("Manage Categories"):
+            _mgmt_cats = load_custom_categories()
+
+            col_r, col_b = st.columns(2)
+            with col_r:
+                st.write("**Recurring Payment Categories**")
+                _all_rec_display = sorted(set(RECURRING_CATEGORIES_DEFAULT + _mgmt_cats.get("recurring_categories", [])))
+                st.write(", ".join(_all_rec_display))
+                _new_rec = st.text_input("New recurring category", key="new_rec_cat_input")
+                if st.button("Add Recurring Category", key="add_rec_cat_btn"):
+                    if _new_rec and _new_rec not in _all_rec_display:
+                        _mgmt_cats.setdefault("recurring_categories", []).append(_new_rec)
+                        save_custom_categories(_mgmt_cats)
+                        st.success(f"Added: {_new_rec}")
+                        st.rerun()
+                    elif _new_rec:
+                        st.warning(f"'{_new_rec}' already exists.")
+
+            with col_b:
+                st.write("**Budget Categories**")
+                _all_bud_display = sorted(set(BUDGET_CATEGORIES_DEFAULT + _mgmt_cats.get("budget_categories", [])))
+                st.write(", ".join(_all_bud_display))
+                _new_bud = st.text_input("New budget category", key="new_bud_cat_input")
+                if st.button("Add Budget Category", key="add_bud_cat_btn"):
+                    if _new_bud and _new_bud not in _all_bud_display:
+                        _mgmt_cats.setdefault("budget_categories", []).append(_new_bud)
+                        save_custom_categories(_mgmt_cats)
+                        st.success(f"Added: {_new_bud}")
+                        st.rerun()
+                    elif _new_bud:
+                        st.warning(f"'{_new_bud}' already exists.")
+
+            st.divider()
+            st.write("**Sub-categories**")
+            _all_cats_combined = sorted(set(_all_rec_display + _all_bud_display))
+            _sel_cat_for_sub = st.selectbox("Category", _all_cats_combined, key="sub_cat_mgmt_selector")
+            _existing_subs = _mgmt_cats.get("subcategories", {}).get(_sel_cat_for_sub, [])
+            if _existing_subs:
+                st.write(f"Current: {', '.join(_existing_subs)}")
+            _new_sub = st.text_input("New sub-category", key="new_sub_input")
+            if st.button("Add Sub-category", key="add_sub_btn"):
+                if _new_sub and _new_sub not in _existing_subs:
+                    _mgmt_cats.setdefault("subcategories", {}).setdefault(_sel_cat_for_sub, []).append(_new_sub)
+                    save_custom_categories(_mgmt_cats)
+                    st.success(f"Added '{_new_sub}' to '{_sel_cat_for_sub}'")
+                    st.rerun()
+                elif _new_sub:
+                    st.warning(f"'{_new_sub}' already exists under '{_sel_cat_for_sub}'.")
+
         # Recurring payments management
         st.subheader("Manage Recurring Payments")
         recurring_payments = load_recurring_payments()
@@ -1435,11 +1517,20 @@ else:
                                     if st.session_state.get('edit_frequency') in frequency_options else 0,
                                      key=f"frequency_{st.session_state.get('edit_payment_id', 'new')}")
 
-            # category = st.text_input("Category", value=st.session_state.get('edit_category', ''))
-            category = st_free_text_select("Category", ["Savings", "India", "Loan", "Mortgage", "Utilities"],
-                                    index=["Savings", "India", "Loan", "Mortgage", "Utilities"].index(st.session_state.get('edit_category', "Savings")),
-                                    key=f"rec_payment_category_{st.session_state.get('edit_category', 'Savings')}")
-            sub_category = st.text_input("Sub-category", value=st.session_state.get('edit_sub_category', ''))
+            _custom_cats_rec = load_custom_categories()
+            _all_rec_cats = sorted(set(RECURRING_CATEGORIES_DEFAULT + _custom_cats_rec.get("recurring_categories", [])))
+            _edit_cat_rec = st.session_state.get('edit_category', _all_rec_cats[0])
+            category = st_free_text_select("Category", _all_rec_cats,
+                                    index=_all_rec_cats.index(_edit_cat_rec) if _edit_cat_rec in _all_rec_cats else 0,
+                                    key=f"rec_payment_category_{_edit_cat_rec}")
+            _all_subcats_rec = sorted(set(s for subs in _custom_cats_rec.get("subcategories", {}).values() for s in subs))
+            _edit_subcat_rec = st.session_state.get('edit_sub_category', '')
+            if _all_subcats_rec:
+                sub_category = st_free_text_select("Sub-category", _all_subcats_rec,
+                                    index=_all_subcats_rec.index(_edit_subcat_rec) if _edit_subcat_rec in _all_subcats_rec else 0,
+                                    key=f"rec_payment_subcategory_{_edit_subcat_rec}")
+            else:
+                sub_category = st.text_input("Sub-category", value=_edit_subcat_rec)
 
             # Add payment type dropdown
             payment_type = st.selectbox("Payment Type", ["Fixed", "Variable"],
@@ -1602,12 +1693,20 @@ else:
             freq_opts = ["Monthly","Bi-weekly","Weekly","Yearly","Quarterly"]
             frequency_b = st.selectbox("Frequency", freq_opts, index=freq_opts.index(st.session_state.get('edit_budget_frequency','Monthly')) if st.session_state.get('edit_budget_frequency','Monthly') in freq_opts else 0,
                                        key=f"budget_frequency_{st.session_state.get('edit_budget_id', 'new')}")
-            #category_b = st.text_input("Category", value=st.session_state.get('edit_budget_category',''))
-            category_b = st_free_text_select("Category", ["Dining", "Entertainment", "Healthcare", "India", "Loan", "Rent", "Shopping", "Transportation", "Utilities"],
-                                           index=["Dining", "Entertainment", "Healthcare", "India", "Loan", "Rent", "Shopping", "Transportation", "Utilities"].index(
-                                               st.session_state.get('edit_budget_category', "Rent")),
-                                           key=f"budget_category_{st.session_state.get('edit_budget_category', 'Rent')}")
-            sub_category_b = st.text_input("Sub-category", value=st.session_state.get('edit_budget_sub_category',''))
+            _custom_cats_bud = load_custom_categories()
+            _all_bud_cats = sorted(set(BUDGET_CATEGORIES_DEFAULT + _custom_cats_bud.get("budget_categories", [])))
+            _edit_cat_bud = st.session_state.get('edit_budget_category', _all_bud_cats[0])
+            category_b = st_free_text_select("Category", _all_bud_cats,
+                                           index=_all_bud_cats.index(_edit_cat_bud) if _edit_cat_bud in _all_bud_cats else 0,
+                                           key=f"budget_category_{_edit_cat_bud}")
+            _all_subcats_bud = sorted(set(s for subs in _custom_cats_bud.get("subcategories", {}).values() for s in subs))
+            _edit_subcat_bud = st.session_state.get('edit_budget_sub_category', '')
+            if _all_subcats_bud:
+                sub_category_b = st_free_text_select("Sub-category", _all_subcats_bud,
+                                    index=_all_subcats_bud.index(_edit_subcat_bud) if _edit_subcat_bud in _all_subcats_bud else 0,
+                                    key=f"budget_subcategory_{_edit_subcat_bud}")
+            else:
+                sub_category_b = st.text_input("Sub-category", value=_edit_subcat_bud)
             payment_type_b = st.selectbox("Payment Type", ["Fixed","Variable"], index=["Fixed","Variable"].index(st.session_state.get('edit_budget_payment_type','Fixed')),
                                           key=f"budget_payment_type_{st.session_state.get('edit_budget_id', 'new')}")
             # Dates
